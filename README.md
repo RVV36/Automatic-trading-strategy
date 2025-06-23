@@ -21,4 +21,4 @@
 1. Презентация
 https://ru.docworkspace.com/d/cIGOh5Ly3AtOM5cIG?sa=S5&st=1
 2.Видео с работой
-https://drive.google.com/file/d/1yJck2g2m1nBY5yjmklRSJQAETzFJhxNj/view?usp=drivesdk
+https://drive.google.com/file/d/1byzgmdGjlL95AkbmZzdX-o0SGtcfWPBN/view?usp=drivesdk
