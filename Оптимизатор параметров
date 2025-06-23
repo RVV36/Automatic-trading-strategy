@@ -1,0 +1,466 @@
+import pandas as pd
+import numpy as np
+import talib as ta
+import optuna
+import logging
+from datetime import datetime, timedelta, time
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+# Параметры стратегии
+PARAMS = {
+    'SBER': {
+        'figi': 'BBG004730N88',
+        'initial_capital': 20000,
+        'commission': 0.0005,
+        'slippage_percent': 0.0005,
+        'lot_size': 10,
+        'min_price_increment': 0.01,
+        'adx_threshold': 20  # Фиксированный порог ADX
+    }
+}
+
+
+# Функция округления цены
+def round_to_increment(price, increment):
+    return np.round(price / increment) * increment
+
+
+# Расчет VWAP для 4H баров без look-ahead (ИСПРАВЛЕНО)
+def calculate_4h_vwap(df_4h, df_1m):
+    df_4h = df_4h.copy()
+    df_4h['vwap'] = np.nan
+
+    for i in range(len(df_4h)):
+        bar_start = df_4h.index[i]
+        bar_end = bar_start + pd.Timedelta(hours=4)
+
+        # Используем только данные, доступные ДО окончания текущего бара
+        minutes_data = df_1m[(df_1m.index >= bar_start) & (df_1m.index < bar_end)]
+
+        if len(minutes_data) < 10:  # Минимальное количество точек для расчета
+            continue
+
+        typical_price = (minutes_data['high'] + minutes_data['low'] + minutes_data['close']) / 3
+        total_pv = (typical_price * minutes_data['volume']).sum()
+        total_vol = minutes_data['volume'].sum()
+
+        if total_vol > 0:
+            df_4h.loc[df_4h.index[i], 'vwap'] = total_pv / total_vol
+
+    return df_4h
+
+def backtest_strategy(df_1m, df_4h_historical, params, fixed_params, ticker):
+    lot_size = fixed_params['lot_size']
+    min_price_increment = fixed_params['min_price_increment']
+    commission = fixed_params['commission']
+    initial_capital = fixed_params['initial_capital']
+    slippage_percent = fixed_params['slippage_percent']
+    adx_threshold = fixed_params['adx_threshold']
+
+    # Рассчитываем VWAP без look-ahead
+    df_4h = calculate_4h_vwap(df_4h_historical, df_1m)
+
+    # Добавляем close_time для проверки завершенности баров
+    df_4h['close_time'] = df_4h.index + pd.Timedelta(hours=4)
+
+    # Рассчитываем индикаторы без look-ahead (только по завершенным данным)
+    macd_values = []
+    signal_values = []
+    adx_values = []
+
+    macd_fast = params['macd_fast']
+    macd_slow = params['macd_slow']
+    macd_signal = params['macd_signal']
+
+    for i in range(len(df_4h)):
+        # Берем только исторические данные до текущего индекса
+        subset = df_4h.iloc[:i + 1]
+
+        # Рассчитываем индикаторы только когда достаточно данных
+        if i < max(macd_slow, macd_signal, 14):
+            macd_values.append(np.nan)
+            signal_values.append(np.nan)
+            adx_values.append(np.nan)
+        else:
+            # MACD
+            macd, signal, _ = ta.MACD(
+                subset['close'],
+                fastperiod=macd_fast,
+                slowperiod=macd_slow,
+                signalperiod=macd_signal
+            )
+            macd_values.append(macd.iloc[-1])
+            signal_values.append(signal.iloc[-1])
+
+            # ADX
+            adx = ta.ADX(
+                subset['high'],
+                subset['low'],
+                subset['close'],
+                timeperiod=14
+            )
+            adx_values.append(adx.iloc[-1])
+
+    # Добавляем рассчитанные индикаторы
+    df_4h['macd'] = macd_values
+    df_4h['signal'] = signal_values
+    df_4h['adx'] = adx_values
+
+    trades = []
+    current_trade = None
+    equity = initial_capital
+    equity_curve = [equity]
+    trade_number = 0
+
+    # Переменные для хранения последнего сигнала
+    last_long_signal = False
+    last_short_signal = False
+
+    for i in range(1, len(df_1m)):
+        current_time = df_1m.index[i]
+        open_price = df_1m['open'].iloc[i]
+        high_price = df_1m['high'].iloc[i]
+        low_price = df_1m['low'].iloc[i]
+
+        # Сброс сигналов при переходе на новый день
+        if current_time.time() < time(4, 5):  # После полуночи
+            last_long_signal = False
+            last_short_signal = False
+
+        # Фильтруем завершенные 4H бары (+1 минута на "остывание")
+        completed_4h = df_4h[df_4h['close_time'] + pd.Timedelta(minutes=1) <= current_time]
+
+        if len(completed_4h) > 1:  # Нужно как минимум 2 завершенных бара
+            # Берем последний завершенный бар и предыдущий
+            last_completed_bar = completed_4h.iloc[-1]
+            prev_bar = completed_4h.iloc[-2]
+
+            # ИСПРАВЛЕНИЕ: Используем isna() вместо np.isnan()
+            if not (last_completed_bar[['vwap', 'macd', 'signal', 'adx']].isna().any() or
+                    prev_bar[['vwap', 'macd', 'signal', 'adx']].isna().any()):
+                # Условия входа с использованием только завершенных данных
+                long_condition = (prev_bar['close'] > prev_bar['vwap']) & \
+                                 (last_completed_bar['macd'] > last_completed_bar['signal']) & \
+                                 (prev_bar['macd'] <= prev_bar['signal']) & \
+                                 (prev_bar['adx'] > adx_threshold)
+
+                short_condition = (prev_bar['close'] < prev_bar['vwap']) & \
+                                  (last_completed_bar['macd'] < last_completed_bar['signal']) & \
+                                  (prev_bar['macd'] >= prev_bar['signal']) & \
+                                  (prev_bar['adx'] > adx_threshold)
+
+                # Сохраняем сигналы для использования в течение периода свечи
+                last_long_signal = long_condition
+                last_short_signal = short_condition
+
+        signal_long = last_long_signal
+        signal_short = last_short_signal
+
+        # Обновление кривой капитала
+        if current_trade:
+            if current_trade['direction'] == 'long':
+                position_value = open_price * current_trade['qty']
+                current_equity = equity + (position_value - current_trade['entry_price'] * current_trade['qty'])
+            else:
+                position_value = current_trade['entry_price'] * current_trade['qty'] - open_price * current_trade['qty']
+                current_equity = equity + position_value
+        else:
+            current_equity = equity
+        equity_curve.append(current_equity)
+
+        # Вход в длинную позицию по открытию
+        if not current_trade and signal_long:
+            entry_price = round_to_increment(open_price * (1 + slippage_percent), min_price_increment)
+            qty = int(equity / (entry_price * lot_size)) * lot_size
+            if qty < lot_size:
+                continue
+            entry_commission = entry_price * qty * commission
+            equity -= entry_commission
+            stop_loss = entry_price * (1 - params['stop_loss_percent'] / 100)
+            take_profit = entry_price * (1 + params['take_profit_percent'] / 100)
+            stop_loss = round_to_increment(stop_loss, min_price_increment)
+            take_profit = round_to_increment(take_profit, min_price_increment)
+            trade_number += 1
+            current_trade = {
+                'trade_number': trade_number,
+                'entry_time': current_time,
+                'entry_price': entry_price,
+                'qty': qty,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'entry_commission': entry_commission,
+                'direction': 'long'
+            }
+
+        # Вход в короткую позицию по открытию
+        elif not current_trade and signal_short:
+            entry_price = round_to_increment(open_price * (1 - slippage_percent), min_price_increment)
+            qty = int(equity / (entry_price * lot_size)) * lot_size
+            if qty < lot_size:
+                continue
+            entry_commission = entry_price * qty * commission
+            equity -= entry_commission
+            stop_loss = entry_price * (1 + params['stop_loss_percent'] / 100)
+            take_profit = entry_price * (1 - params['take_profit_percent'] / 100)
+            stop_loss = round_to_increment(stop_loss, min_price_increment)
+            take_profit = round_to_increment(take_profit, min_price_increment)
+            trade_number += 1
+            current_trade = {
+                'trade_number': trade_number,
+                'entry_time': current_time,
+                'entry_price': entry_price,
+                'qty': qty,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'entry_commission': entry_commission,
+                'direction': 'short'
+            }
+
+        # Выход из позиции по ценам бара
+        elif current_trade:
+            exit_price = None
+            exit_reason = None
+
+            if current_trade['direction'] == 'long':
+                if high_price >= current_trade['take_profit']:
+                    exit_price = current_trade['take_profit']
+                    exit_reason = 'Take Profit'
+                elif low_price <= current_trade['stop_loss']:
+                    exit_price = current_trade['stop_loss']
+                    exit_reason = 'Stop Loss'
+            else:
+                if low_price <= current_trade['take_profit']:
+                    exit_price = current_trade['take_profit']
+                    exit_reason = 'Take Profit'
+                elif high_price >= current_trade['stop_loss']:
+                    exit_price = current_trade['stop_loss']
+                    exit_reason = 'Stop Loss'
+
+            if exit_price:
+                exit_commission = exit_price * current_trade['qty'] * commission
+                if current_trade['direction'] == 'long':
+                    profit = (exit_price - current_trade['entry_price']) * current_trade['qty'] - \
+                             (current_trade['entry_commission'] + exit_commission)
+                else:
+                    profit = (current_trade['entry_price'] - exit_price) * current_trade['qty'] - \
+                             (current_trade['entry_commission'] + exit_commission)
+                equity += profit
+                current_trade.update({
+                    'exit_time': current_time,
+                    'exit_price': exit_price,
+                    'exit_reason': exit_reason,
+                    'profit': profit,
+                    'equity': equity,
+                    'exit_commission': exit_commission
+                })
+                trades.append(current_trade)
+                current_trade = None
+
+    # Закрытие открытой позиции по последнему доступному открытию
+    if current_trade:
+        exit_price = round_to_increment(df_1m['open'].iloc[-1], min_price_increment)
+        exit_commission = exit_price * current_trade['qty'] * commission
+        if current_trade['direction'] == 'long':
+            profit = (exit_price - current_trade['entry_price']) * current_trade['qty'] - \
+                     (current_trade['entry_commission'] + exit_commission)
+        else:
+            profit = (current_trade['entry_price'] - exit_price) * current_trade['qty'] - \
+                     (current_trade['entry_commission'] + exit_commission)
+        equity += profit
+        current_trade.update({
+            'exit_time': df_1m.index[-1],
+            'exit_price': exit_price,
+            'exit_reason': 'Конец теста',
+            'profit': profit,
+            'equity': equity,
+            'exit_commission': exit_commission
+        })
+        trades.append(current_trade)
+
+    # Расчет метрик
+    if trades:
+        total_profit = sum(trade['profit'] for trade in trades)
+        num_trades = len(trades)
+        win_trades = [t for t in trades if t['profit'] > 0]
+        win_rate = len(win_trades) / num_trades * 100 if num_trades > 0 else 0
+        gross_profit = sum(t['profit'] for t in win_trades)
+        loss_trades = [t for t in trades if t['profit'] <= 0]
+        gross_loss = abs(sum(t['profit'] for t in loss_trades)) if loss_trades else 0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        total_commissions = sum(trade['entry_commission'] + trade['exit_commission'] for trade in trades)
+        final_equity = equity_curve[-1]
+        years = (df_1m.index[-1] - df_1m.index[0]).days / 365.25
+        cagr = ((final_equity / initial_capital) ** (1 / years) - 1) * 100 if years > 0 else 0
+        peak = initial_capital
+        max_drawdown = 0
+        for eq in equity_curve:
+            if eq > peak:
+                peak = eq
+            drawdown = (peak - eq) / peak * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+    else:
+        total_profit = 0
+        num_trades = 0
+        win_rate = 0
+        profit_factor = 0
+        total_commissions = 0
+        final_equity = initial_capital
+        cagr = 0
+        max_drawdown = 0
+
+    return {
+        'total_profit': total_profit,
+        'num_trades': num_trades,
+        'win_rate': win_rate,
+        'profit_factor': profit_factor,
+        'max_drawdown': max_drawdown,
+        'final_equity': final_equity,
+        'cagr': cagr,
+        'total_commissions': total_commissions,
+        'equity_curve': equity_curve,
+        'trades': trades
+    }
+
+
+# Walk-forward оптимизация (ИСПРАВЛЕНО)
+def walk_forward_optimize(ticker, n_trials, start_date, end_date):
+    file_path = f'{ticker}_combined_2023_2025.csv'
+    try:
+        df = pd.read_csv(file_path, parse_dates=['time'], index_col='time')
+        required_columns = ['open', 'high', 'low', 'close', 'volume', 'timeframe']
+        if not all(col in df.columns for col in required_columns):
+            logging.error(f"Отсутствуют столбцы в данных: {[col for col in required_columns if col not in df.columns]}")
+            return [], []
+    except FileNotFoundError:
+        logging.error(f"Файл данных для {ticker} не найден")
+        return [], []
+
+    df = df.sort_index()
+    # Фильтрация по времени торгов
+    df_1m = df[df['timeframe'] == '1m'].between_time('04:00', '20:50')
+    df_4h = df[df['timeframe'] == '4H'].between_time('04:00', '20:00')
+
+    if df_1m.empty or df_4h.empty:
+        logging.error("Нет данных для минутного или 4-часового таймфрейма")
+        return [], []
+
+    fixed_params = PARAMS[ticker].copy()
+    fixed_params['adx_threshold'] = 20
+
+    train_years = 2
+    test_months = 12
+    step_months = 12
+    current_date = pd.to_datetime(start_date, utc=True)
+    end_date = pd.to_datetime(end_date, utc=True)
+    train_period = pd.DateOffset(years=train_years)
+    test_period = pd.DateOffset(months=test_months)
+    step_period = pd.DateOffset(months=step_months)
+
+    all_equity_curves = []
+    best_params_list = []
+    all_trades = []
+    step_num = 1
+
+    while current_date + train_period + test_period <= end_date:
+        train_start = current_date
+        train_end = current_date + train_period - timedelta(seconds=1)
+        test_start = train_end + timedelta(seconds=1)
+        test_end = test_start + test_period - timedelta(seconds=1)
+
+        # Подготовка данных без look-ahead
+        # Для тренировки используем только данные до конца тренировочного периода
+        df_4h_train = df_4h.loc[train_start:train_end].copy()
+        df_train_1m = df_1m.loc[train_start:train_end].copy()
+
+        # Для теста берем данные с запасом для инициализации индикаторов
+        history_start = train_start - pd.DateOffset(months=6)  # Добавляем 6 месяцев истории
+        df_4h_test = df_4h.loc[history_start:test_end].copy()
+        df_test_1m = df_1m.loc[history_start:test_end].copy()
+
+        if len(df_train_1m) < 500 or len(df_test_1m) == 0 or len(df_4h_train) < 50:
+            logging.warning(f"Пропуск шага {step_num}: недостаточно данных")
+            current_date += step_period
+            step_num += 1
+            continue
+
+        def objective(trial):
+            params = {
+                'macd_fast': trial.suggest_int('macd_fast', 5, 20),
+                'macd_slow': trial.suggest_int('macd_slow', 10, 30),
+                'macd_signal': trial.suggest_int('macd_signal', 5, 20),
+                'stop_loss_percent': trial.suggest_float('stop_loss_percent', 0.5, 3.0),
+                'take_profit_percent': trial.suggest_float('take_profit_percent', 1.0, 6.0)
+            }
+            metrics = backtest_strategy(df_train_1m, df_4h_train, params, fixed_params, ticker)
+
+            reject_reason = ""
+            if metrics['num_trades'] < 10:
+                reject_reason = "Слишком мало сделок (<10)"
+            elif metrics['win_rate'] < 25:
+                reject_reason = "Низкий процент выигрышей (<25%)"
+            elif metrics['profit_factor'] < 1.0:
+                reject_reason = f"Фактор прибыли <1 ({metrics['profit_factor']:.2f})"
+            elif metrics['max_drawdown'] > 30:
+                reject_reason = f"Слишком большая просадка ({metrics['max_drawdown']:.2f}%)"
+
+            if reject_reason:
+                trial.set_user_attr("reject_reason", reject_reason)
+                return -float('inf')
+
+            trade_count_penalty = max(0, 20 - metrics['num_trades']) * 100
+            stability_bonus = metrics['win_rate'] * 10 if metrics['win_rate'] > 50 else 0
+            score = metrics['total_profit'] - trade_count_penalty + stability_bonus
+
+            logging.info(
+                f"Trial {trial.number}: Прибыль={metrics['total_profit']:.2f} RUB, "
+                f"Сделки={metrics['num_trades']}, Win%={metrics['win_rate']:.1f}, "
+                f"PF={metrics['profit_factor']:.2f}, MDD={metrics['max_drawdown']:.1f}%"
+            )
+            return score
+
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=n_trials)
+
+        best_params = study.best_params
+        metrics_test = backtest_strategy(df_test_1m, df_4h_test, best_params, fixed_params, ticker)
+
+        logging.info(f"\n=== Шаг {step_num}: Тестовый период {test_start} - {test_end} ===")
+        logging.info(f"Лучшие параметры: {best_params}")
+        logging.info(f"Общая прибыль: {metrics_test['total_profit']:.2f} RUB")
+        logging.info(f"Количество сделок: {metrics_test['num_trades']}")
+        logging.info(f"Процент выигрышей: {metrics_test['win_rate']:.2f}%")
+        logging.info(f"Фактор прибыли: {metrics_test['profit_factor']:.4f}")
+        logging.info(f"Максимальная просадка: {metrics_test['max_drawdown']:.2f}%")
+        logging.info(f"Конечный капитал: {metrics_test['final_equity']:.2f} RUB")
+        logging.info(f"CAGR: {metrics_test['cagr']:.2f}%")
+        logging.info(f"Комиссии: {metrics_test['total_commissions']:.2f} RUB")
+
+        if metrics_test['trades']:
+            trades_df = pd.DataFrame(metrics_test['trades'])
+            trades_df.to_csv(f'{ticker}_test_trades_step_{step_num}.csv', index=False)
+
+        all_equity_curves.append(metrics_test['equity_curve'])
+        best_params_list.append(best_params)
+        all_trades.extend(metrics_test['trades'])
+        step_num += 1
+        current_date += step_period
+
+    if all_trades:
+        pd.DataFrame(all_trades).to_csv(f'{ticker}_all_trades.csv', index=False)
+
+    return all_equity_curves, best_params_list
+
+
+if __name__ == "__main__":
+    tickers = ['SBER']
+    n_trials = 300
+    start_date = '2020-01-01'
+    end_date = '2025-05-30'
+
+    for ticker in tickers:
+        logging.info(f"Оптимизация для {ticker}")
+        equity_curves, best_params = walk_forward_optimize(ticker, n_trials, start_date, end_date)
+        logging.info(f"Оптимизация завершена для {ticker}")
