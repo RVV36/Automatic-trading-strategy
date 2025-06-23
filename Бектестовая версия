@@ -1,0 +1,386 @@
+import pandas as pd
+import numpy as np
+import talib as ta
+import matplotlib.pyplot as plt
+import logging
+from datetime import datetime, timedelta
+
+# Настройка логирования
+logging.basicConfig(filename='backtest_logs.txt', level=logging.INFO,
+                    format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+# Параметры стратегии
+PARAMS = {
+    # 'T': {
+    #     'figi': 'TCS80A107UL4',
+    #     'fastLength': 3, 'slowLength': 8, 'signalLength': 9, 'htf_multiplier': 3, 'crossscore': 1.908388561877178, 'indiside': 3, 'histside': 7, 'calc': 8, 'ema_period': 7, 'atr_period': 12, 'atr_multiplier': 3.331204422876999, 'min_trailing_stop_percent': 1.0143691362482783, 'profit_target_percent': 9.194533124680973, 'change_threshold': 1.0103057046328094, 'stop_loss_percent': 1.0299679089768499,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1, 'min_price_increment': 0.2
+    # },
+    # 'HEAD': {
+    #     'figi': 'TCS20A107662',
+    #     'fastLength': 1, 'slowLength': 9, 'signalLength': 10, 'htf_multiplier': 4, 'crossscore': 9.936411439804372, 'indiside': 8, 'histside': 11, 'calc': 4, 'ema_period': 9, 'atr_period': 15, 'atr_multiplier': 2.3167868998289856, 'min_trailing_stop_percent': 1.4684792098693074, 'profit_target_percent': 4.576894004807892, 'change_threshold': 0.8482929188387356, 'stop_loss_percent': 2.685977413029655,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 1.0
+    # },
+    # 'MTLR': {
+    #     'figi': 'BBG004S68598',
+    #     'fastLength': 2, 'slowLength': 4, 'signalLength': 5, 'htf_multiplier': 9,
+    #     'crossscore': 13.627245877840087, 'indiside': 8, 'histside': 7, 'calc': 8,
+    #     'ema_period': 8, 'atr_period': 9, 'atr_multiplier': 0.10013775156564958, 'min_trailing_stop_percent': 0.0011860996345339496,
+    #     'profit_target_percent': 9.820793462768739, 'change_threshold': 0.8166204292817222, 'stop_loss_percent': 0.2784640158091696,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.01
+    # },
+    # 'NVTK': {
+    #     'figi': 'BBG00475KKY8',
+    #     'fastLength': 1, 'slowLength': 3, 'signalLength': 2, 'htf_multiplier': 5,
+    #     'crossscore': 6.362898853777833, 'indiside': 9, 'histside': 13, 'calc': 2,
+    #     'ema_period': 2, 'atr_period': 5, 'atr_multiplier': 0.10082980408707433, 'min_trailing_stop_percent': 0.274005486279445,
+    #     'profit_target_percent': 8.468611864270919, 'change_threshold': 1.0985412936725243, 'stop_loss_percent': 1.7975475206529785,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.2
+    # },
+    # 'PIKK': {
+    #     'figi': 'BBG004S68BH6',
+    #     'fastLength': 10, 'slowLength': 5, 'signalLength': 6, 'htf_multiplier': 1, 'crossscore': 7.231928205172064, 'indiside': 15, 'histside': 9, 'calc': 10, 'ema_period': 4, 'atr_period': 9, 'atr_multiplier': 3.6298176817959367, 'min_trailing_stop_percent': 1.4750055025685942, 'profit_target_percent': 9.882480362777809, 'change_threshold': 1.1666428871889325, 'stop_loss_percent': 1.972940096149645,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.1
+    # },
+    # 'PLZL': {
+    #     'figi': 'BBG000R607Y3',
+    #     'fastLength': 1, 'slowLength': 3, 'signalLength': 2, 'htf_multiplier': 3,
+    #     'crossscore': 10.744779050340863, 'indiside': 14, 'histside': 8, 'calc': 3,
+    #     'ema_period': 2, 'atr_period': 14, 'atr_multiplier': 0.10032523016432808, 'min_trailing_stop_percent': 0.0017781329896740788,
+    #     'profit_target_percent': 7.056931704303024, 'change_threshold': 0.7813362165916689, 'stop_loss_percent': 1.1627913680658617,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.2
+    # },
+    'SBER': {
+        'figi': 'BBG004730N88',
+        'fastLength': 5, 'slowLength': 12, 'signalLength': 9, 'htf_multiplier': 6,
+        'crossscore': 9.00238026990008, 'indiside': 4, 'histside': 3, 'calc': 2,
+        'ema_period': 2, 'atr_period': 8, 'atr_multiplier': 0.10076772101849796, 'min_trailing_stop_percent': 0.0312126178228741,
+        'profit_target_percent': 9.031392584007804, 'change_threshold': 0.5229075453067857, 'stop_loss_percent': 0.9093518741141723,
+        'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 10,
+        'min_price_increment': 0.01
+    # },
+    # 'SFIN': {
+    #     'figi': 'BBG003LYCMB1',
+    #     'fastLength': 1, 'slowLength': 2, 'signalLength': 3, 'htf_multiplier': 1,
+    #     'crossscore': 1.5938442099760697, 'indiside': 14, 'histside': 1, 'calc': 13,
+    #     'ema_period': 2, 'atr_period': 17, 'atr_multiplier': 0.10116367340275571, 'min_trailing_stop_percent': 0.12439820305481808,
+    #     'profit_target_percent': 8.379885831584945, 'change_threshold': 0.07951844442730328, 'stop_loss_percent': 0.2774709241242669,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.2
+    # },
+    # 'TATN': {
+    #     'figi': 'BBG004RVFFC0',
+    #     'fastLength': 1, 'slowLength': 7, 'signalLength': 5, 'htf_multiplier': 3,
+    #     'crossscore': 9.54187164700084, 'indiside': 7, 'histside': 4, 'calc': 14,
+    #     'ema_period': 2, 'atr_period': 3, 'atr_multiplier': 0.10022508921894348,
+    #     'min_trailing_stop_percent': 1.421006846803935, 'profit_target_percent': 9.527285162359538,
+    #     'change_threshold': 0.47744012414943654, 'stop_loss_percent': 1.9025204854865205,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.1
+    # },
+    # 'YDEX': {
+    #     'figi': 'TCS00A107T19',
+    #     'fastLength': 10, 'slowLength': 3, 'signalLength': 7, 'htf_multiplier': 1, 'crossscore': 6.41920964169406, 'indiside': 14, 'histside': 1, 'calc': 7, 'ema_period': 6, 'atr_period': 12, 'atr_multiplier': 6.890390560264161, 'min_trailing_stop_percent': 0.9070696321231355, 'profit_target_percent': 9.432652533786035, 'change_threshold': 1.0595296841573418, 'stop_loss_percent': 1.424370364346743,
+    #     'initial_capital': 20000, 'commission': 0.0005, 'slippage_percent': 0.001, 'lot_size': 1,
+    #     'min_price_increment': 0.5
+    }
+}
+
+
+overall_deposit_limit = 1.0
+
+def round_to_increment(price, increment):
+    """Округляет цену до заданного min_price_increment."""
+    return np.round(price / increment) * increment
+
+def calculate_anlyse(close, length1, length2, period, params):
+    """Рассчитывает индикатор anlyse."""
+    alpha1 = 2 / (length1 + 1)
+    alpha2 = 2 / (length2 + 1)
+    alpha3 = 2 / (period + 1)
+    ema1 = close.ewm(alpha=alpha1, adjust=False).mean()
+    ema2 = close.ewm(alpha=alpha2, adjust=False).mean()
+    indi = ema1 - ema2
+    signal = indi.ewm(alpha=alpha3, adjust=False).mean()
+    hist = indi - signal
+    anlyse = pd.Series(0.0, index=close.index)
+    countcross = pd.Series(0.0, index=close.index)
+    indi_diff = indi.diff()
+    hist_diff = hist.diff()
+    anlyse = np.where(indi_diff > 0,
+                      np.where(hist_diff > 0, params['indiside'] + params['histside'],
+                               np.where(hist_diff == 0, params['indiside'], params['indiside'] - params['histside'])),
+                      np.where(indi_diff < 0,
+                               np.where(hist_diff < 0, -(params['indiside'] + params['histside']),
+                                        np.where(hist_diff == 0, -params['indiside'], -(params['indiside'] - params['histside']))),
+                               np.where(hist_diff > 0, params['histside'],
+                                        np.where(hist_diff < 0, -params['histside'], 0))))
+    cross_up = (indi > signal) & (indi.shift(1) <= signal.shift(1))
+    cross_down = (indi < signal) & (indi.shift(1) >= signal.shift(1))
+    countcross = np.where(cross_up, params['crossscore'],
+                          np.where(cross_down, -params['crossscore'], countcross.shift(1).fillna(0) * 0.6))
+    return pd.Series(anlyse + countcross, index=close.index)
+
+def calculate_indicators(df, params, i):
+    """Рассчитывает индикаторы, исключая текущую свечу."""
+    df_closed = df.iloc[:i].copy()
+    if len(df_closed) < max(params['slowLength'] * params['htf_multiplier'], params['atr_period']):
+        return None
+
+    anlys = calculate_anlyse(df_closed['close'], params['fastLength'], params['slowLength'], params['signalLength'], params)
+    anlysHfrm = calculate_anlyse(df_closed['close'], params['fastLength'] * params['htf_multiplier'],
+                                 params['slowLength'] * params['htf_multiplier'],
+                                 params['signalLength'] * params['htf_multiplier'], params)
+    result = (anlysHfrm * params['calc'] + anlys) / (params['calc'] + 1)
+    ema_50 = df_closed['close'].ewm(span=params['ema_period'], adjust=False).mean()
+    trend_filter = df_closed['close'] > ema_50
+    result_change = result.diff()
+    long_condition = (abs(result_change) > params['change_threshold']) & (result > 0) & trend_filter
+    df_closed['atr'] = ta.ATR(df_closed['high'], df_closed['low'], df_closed['close'], timeperiod=params['atr_period'])
+    return {'long_condition': long_condition.iloc[-1], 'atr': df_closed['atr'].iloc[-1]}
+
+for key, value in PARAMS.items():
+    ticker = key
+    params = value
+
+    # Загрузка данных
+    try:
+        df = pd.read_csv(f'{ticker}_combined_2023_2025.csv', parse_dates=['time'])
+    except FileNotFoundError:
+        logging.error(f"Data file for {ticker} not found")
+        continue
+
+    # Валидация данных
+    required_columns = ['time', 'open', 'high', 'low', 'close', 'volume', 'timeframe']
+    if not all(col in df.columns for col in required_columns):
+        logging.error(f"{ticker}: Missing required columns in data")
+        continue
+    if (df[['open', 'high', 'low', 'close']] <= 0).any().any():
+        logging.error(f"{ticker}: Invalid negative or zero prices detected")
+        continue
+    if (df['low'] > df['high']).any():
+        logging.error(f"{ticker}: Invalid data: low > high detected")
+        continue
+
+    # Разделение на часовые и минутные свечи
+    df_4h = df[df['timeframe'] == 'H'].copy()
+    df_1m = df[df['timeframe'] == '1m'].copy()
+    df_4h.set_index('time', inplace=True)
+    df_1m.set_index('time', inplace=True)
+    df_4h.sort_index(inplace=True)
+    df_1m.sort_index(inplace=True)
+
+    # Фильтрация по рабочим часам
+    df_4h = df_4h[(df_4h.index.time >= pd.Timestamp('04:00').time()) &
+                  (df_4h.index.time <= pd.Timestamp('20:00').time())]
+
+    # Ограничение периода
+    start_date = pd.Timestamp('2022-01-01', tz='UTC')
+    end_date = pd.Timestamp('2022-12-31', tz='UTC')
+    df_4h = df_4h[(df_4h.index >= start_date) & (df_4h.index <= end_date)]
+    df_1m = df_1m[(df_1m.index >= start_date) & (df_1m.index <= end_date)]
+
+    if df_4h.empty or df_1m.empty:
+        logging.warning(f"No data available for {ticker} in the specified period")
+        continue
+
+    trades = []
+    current_trade = None
+    equity = params['initial_capital']
+    equity_curve = [equity]
+    entries = []
+    exits = []
+    trade_number = 0
+    last_entry_candle = None
+
+    for i in range(1, len(df_4h)):
+        current_date = df_4h.index[i]
+        indicators = calculate_indicators(df_4h, params, i)
+        if indicators is None:
+            continue
+
+        close_price = df_4h['close'].iloc[i]
+
+        # Обновление equity curve
+        if current_trade is not None:
+            position_value = close_price * current_trade['qty']
+            current_equity = equity + (position_value - current_trade['entry_price'] * current_trade['qty'])
+        else:
+            current_equity = equity
+        equity_curve.append(current_equity)
+
+        # Проверка входа
+        if (current_trade is None and indicators['long_condition'] and
+                (last_entry_candle is None or current_date != last_entry_candle)):
+            logging.info(f"{ticker}: {current_date}: Signal triggered")
+            entry_price = round_to_increment(close_price, params['min_price_increment'])
+            lot_size = params['lot_size']
+            deposit_limit_per_ticker = overall_deposit_limit
+            allocated_money = equity * deposit_limit_per_ticker
+            qty_lots = int(allocated_money / (entry_price * lot_size))
+            qty = qty_lots * lot_size
+            if qty < lot_size:
+                logging.warning(f"{ticker}: {current_date}: Insufficient qty={qty}, entry_price={entry_price:.2f}, equity={equity:.2f}")
+                continue
+            entry_commission = entry_price * qty * params['commission']
+            equity -= entry_commission
+            highest_price = entry_price
+            atr_value = indicators['atr']
+            if pd.isna(atr_value):
+                logging.warning(f"{ticker}: {current_date}: ATR is nan, skipping trade")
+                continue
+            trailing_stop = max(entry_price - atr_value * params['atr_multiplier'],
+                                entry_price * (1 - params['min_trailing_stop_percent'] / 100))
+            trailing_stop = round_to_increment(trailing_stop, params['min_price_increment'])
+            take_profit = entry_price * (1 + params['profit_target_percent'] / 100)
+            take_profit = round_to_increment(take_profit, params['min_price_increment'])
+            stop_loss = entry_price * (1 - params['stop_loss_percent'] / 100)
+            stop_loss = round_to_increment(stop_loss, params['min_price_increment'])
+            trade_number += 1
+            current_trade = {
+                'trade_number': trade_number,
+                'entry_time': current_date,
+                'entry_price': entry_price,
+                'qty': qty,
+                'highest_price': highest_price,
+                'trailing_stop': trailing_stop,
+                'take_profit': take_profit,
+                'stop_loss': stop_loss,
+                'entry_commission': entry_commission,
+                'atr_value': atr_value
+            }
+            logging.info(f"{ticker}: Вход в позицию: entry_price={entry_price:.2f}, qty={qty}, atr_value={atr_value:.4f}, "
+                         f"trailing_stop={trailing_stop:.2f}, take_profit={take_profit:.2f}, stop_loss={stop_loss:.2f}")
+            entries.append((current_date, entry_price))
+            last_entry_candle = current_date
+
+        # Проверка условий выхода на минутных свечах
+        elif current_trade is not None:
+            minute_start = current_date
+            minute_end = current_date + timedelta(hours=1)
+            df_minute = df_1m[(df_1m.index >= minute_start) & (df_1m.index < minute_end)]
+            if df_minute.empty:
+                logging.warning(f"{ticker}: {current_date}: No minute data, skipping exit check")
+                continue
+
+            for j in range(len(df_minute)):
+                minute_close = df_minute['close'].iloc[j]
+                minute_time = df_minute.index[j]
+
+                # Обновляем highest_price и trailing_stop
+                if minute_close > current_trade['highest_price']:
+                    current_trade['highest_price'] = minute_close
+                new_trailing_stop = max(
+                    current_trade['highest_price'] - current_trade['atr_value'] * params['atr_multiplier'],
+                    current_trade['entry_price'] * (1 - params['min_trailing_stop_percent'] / 100)
+                )
+                current_trade['trailing_stop'] = max(current_trade['trailing_stop'], new_trailing_stop)
+                current_trade['trailing_stop'] = round_to_increment(current_trade['trailing_stop'], params['min_price_increment'])
+
+                exit_price = None
+                exit_reason = None
+                if minute_close >= current_trade['take_profit']:
+                    exit_price = current_trade['take_profit']
+                    exit_reason = 'Take Profit'
+                elif minute_close <= current_trade['trailing_stop']:
+                    exit_price = current_trade['trailing_stop']
+                    exit_reason = 'Trailing Stop'
+                elif minute_close <= current_trade['stop_loss']:
+                    exit_price = current_trade['stop_loss']
+                    exit_reason = 'Stop Loss'
+
+                if exit_price:
+                    exit_price = round_to_increment(exit_price, params['min_price_increment'])
+                    exit_commission = exit_price * current_trade['qty'] * params['commission']
+                    profit = (exit_price - current_trade['entry_price']) * current_trade['qty'] - (current_trade['entry_commission'] + exit_commission)
+                    equity += profit
+                    current_trade.update({
+                        'exit_time': minute_time,
+                        'exit_price': exit_price,
+                        'exit_reason': exit_reason,
+                        'profit': profit,
+                        'equity': equity,
+                        'exit_commission': exit_commission
+                    })
+                    logging.info(f"{ticker}: EXIT: exit_price={exit_price:.2f}, reason={exit_reason}, profit={profit:.2f}")
+                    trades.append(current_trade)
+                    current_trade = None
+                    exits.append((minute_time, exit_price))
+                    break
+
+    # Закрытие открытой позиции в конце периода
+    if current_trade is not None:
+        last_minute = df_1m[df_1m.index <= df_4h.index[-1]].index[-1]
+        exit_price = round_to_increment(df_1m.loc[last_minute, 'close'], params['min_price_increment'])
+        exit_commission = exit_price * current_trade['qty'] * params['commission']
+        profit = (exit_price - current_trade['entry_price']) * current_trade['qty'] - (current_trade['entry_commission'] + exit_commission)
+        equity += profit
+        current_trade.update({
+            'exit_time': last_minute,
+            'exit_price': exit_price,
+            'exit_reason': 'End of Test Period',
+            'profit': profit,
+            'equity': equity,
+            'exit_commission': exit_commission
+        })
+        logging.info(f"{ticker}: EXIT (END): exit_price={exit_price:.2f}, profit={profit:.2f}")
+        trades.append(current_trade)
+        exits.append((last_minute, exit_price))
+
+    # Расчет метрик
+    if trades:
+        total_profit = sum(trade['profit'] for trade in trades)
+        num_trades = len(trades)
+        win_rate = len([t for t in trades if t['profit'] > 0]) / num_trades * 100
+        gross_profit = sum(t['profit'] for t in trades if t['profit'] > 0)
+        gross_loss = abs(sum(t['profit'] for t in trades if t['profit'] <= 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        total_commissions = sum(trade['entry_commission'] + trade['exit_commission'] for trade in trades)
+        final_equity = equity_curve[-1]
+
+        # Расчет CAGR
+        start_date = df_4h.index[0]
+        end_date = df_4h.index[-1]
+        delta = end_date - start_date
+        years = delta.days / 365.25
+        cagr = ((final_equity / params['initial_capital']) ** (1 / years) - 1) * 100 if years > 0 else 0
+
+        # Расчет Max Drawdown
+        peak = equity_curve[0]
+        max_drawdown = 0
+        for eq in equity_curve:
+            if eq > peak:
+                peak = eq
+            drawdown = (peak - eq) / peak * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+    else:
+        total_profit = 0
+        num_trades = 0
+        win_rate = 0
+        profit_factor = 0
+        total_commissions = 0
+        final_equity = params['initial_capital']
+        cagr = 0
+        max_drawdown = 0
+
+    # Логирование метрик
+    logging.info(f"\nPerformance Metrics: {ticker}")
+    logging.info(f"Total Profit: {total_profit:.2f} RUB")
+    logging.info(f"Number of Trades: {num_trades}")
+    logging.info(f"Win Rate: {win_rate:.2f}%")
+    logging.info(f"Profit Factor: {profit_factor:.3f}")
+    logging.info(f"Max Drawdown: {max_drawdown:.2f}%")
+    logging.info(f"Final Equity: {final_equity:.2f} RUB")
+    logging.info(f"CAGR: {cagr:.2f}%")
+    logging.info(f"Total Commissions: {total_commissions:.2f} RUB")
+
+    # Сохранение сделок
+    trades_df = pd.DataFrame(trades)
+    if not trades_df.empty:
+        trades_df.to_csv(f'trades_{ticker}.csv', index=False)
