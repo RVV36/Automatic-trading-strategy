@@ -1,0 +1,803 @@
+import pandas as pd
+import numpy as np
+from tinkoff.invest import Client, CandleInterval, OrderDirection, OrderType, InstrumentIdType, SubscribeCandlesRequest, SubscriptionAction, AsyncClient
+from tinkoff.invest.utils import now
+from datetime import datetime, timedelta, timezone
+import time
+import talib as ta
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+import json
+import os
+import threading
+import asyncio
+from pytz import timezone as pytz_timezone
+
+
+
+SANDBOX_TOKEN =
+TELEGRAM_TOKEN = 
+ALLOWED_CHAT_ID = 
+
+
+PARAMS = {
+    'T': {
+        'figi': 'TCS80A107UL4',
+        'fastLength': 1, 'slowLength': 7, 'signalLength': 5, 'htf_multiplier': 10,
+        'crossscore': 4.161274220756301, 'indiside': 10, 'histside': 12, 'calc': 2,
+        'ema_period': 4, 'atr_period': 5, 'atr_multiplier': 0.10052540164817039, 'min_trailing_stop_percent': 0.0011285585336922254,
+        'profit_target_percent': 8.876730297693204, 'change_threshold': 0.6094933809624806, 'stop_loss_percent': 0.4056947091333938,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+
+    },
+    'HEAD': {
+        'figi': 'TCS20A107662',
+        'fastLength': 2, 'slowLength': 10, 'signalLength': 2, 'htf_multiplier': 5,
+        'crossscore': 10.21003667360762, 'indiside': 12, 'histside': 13, 'calc': 10,
+        'ema_period': 2, 'atr_period': 8, 'atr_multiplier': 0.10043811038986342, 'min_trailing_stop_percent': 0.0013650870926748757,
+        'profit_target_percent': 9.129399742453781, 'change_threshold': 0.510766433309719, 'stop_loss_percent': 1.4998485407455187,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'MTLR': {
+        'figi': 'BBG004S68598',
+        'fastLength': 2, 'slowLength': 4, 'signalLength': 5, 'htf_multiplier': 9,
+        'crossscore': 13.627245877840087, 'indiside': 8, 'histside': 7, 'calc': 8,
+        'ema_period': 8, 'atr_period': 9, 'atr_multiplier': 0.10013775156564958, 'min_trailing_stop_percent': 0.0011860996345339496,
+        'profit_target_percent': 9.820793462768739, 'change_threshold': 0.8166204292817222, 'stop_loss_percent': 0.2784640158091696,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'NVTK': {
+        'figi': 'BBG00475KKY8',
+        'fastLength': 1, 'slowLength': 3, 'signalLength': 2, 'htf_multiplier': 5,
+        'crossscore': 6.362898853777833, 'indiside': 9, 'histside': 13, 'calc': 2,
+        'ema_period': 2, 'atr_period': 5, 'atr_multiplier': 0.10082980408707433, 'min_trailing_stop_percent': 0.274005486279445,
+        'profit_target_percent': 8.468611864270919, 'change_threshold': 1.0985412936725243, 'stop_loss_percent': 1.7975475206529785,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'PIKK': {
+        'figi': 'BBG004S68BH6',
+        'fastLength': 1, 'slowLength': 7, 'signalLength': 2, 'htf_multiplier': 2,
+        'crossscore': 5.0823551339425395, 'indiside': 15, 'histside': 3, 'calc': 7,
+        'ema_period': 2, 'atr_period': 15, 'atr_multiplier': 0.10238624795409927, 'min_trailing_stop_percent': 1.3065129065024796,
+        'profit_target_percent': 9.012164202476104, 'change_threshold': 0.326153462200039, 'stop_loss_percent': 1.1889565967992963,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'PLZL': {
+        'figi': 'BBG000R607Y3',
+        'fastLength': 1, 'slowLength': 3, 'signalLength': 2, 'htf_multiplier': 3,
+        'crossscore': 10.744779050340863, 'indiside': 14, 'histside': 8, 'calc': 3,
+        'ema_period': 2, 'atr_period': 14, 'atr_multiplier': 0.10032523016432808, 'min_trailing_stop_percent': 0.0017781329896740788,
+        'profit_target_percent': 7.056931704303024, 'change_threshold': 0.7813362165916689, 'stop_loss_percent': 1.1627913680658617,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'SBER': {
+        'figi': 'BBG004730N88',
+        'fastLength': 2, 'slowLength': 3, 'signalLength': 4, 'htf_multiplier': 4,
+        'crossscore': 6.515634961972747, 'indiside': 15, 'histside': 10, 'calc': 2,
+        'ema_period': 2, 'atr_period': 3, 'atr_multiplier': 0.10076772101849796, 'min_trailing_stop_percent': 0.0312126178228741,
+        'profit_target_percent': 9.031392584007804, 'change_threshold': 0.5229075453067857, 'stop_loss_percent': 0.9093518741141723,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'SFIN': {
+        'figi': 'BBG003LYCMB1',
+        'fastLength': 1, 'slowLength': 2, 'signalLength': 3, 'htf_multiplier': 1,
+        'crossscore': 1.5938442099760697, 'indiside': 14, 'histside': 1, 'calc': 13,
+        'ema_period': 2, 'atr_period': 17, 'atr_multiplier': 0.10116367340275571, 'min_trailing_stop_percent': 0.12439820305481808,
+        'profit_target_percent': 8.379885831584945, 'change_threshold': 0.07951844442730328, 'stop_loss_percent': 0.2774709241242669,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'TATN': {
+        'figi': 'BBG004RVFFC0',
+        'fastLength': 1, 'slowLength': 7, 'signalLength': 5, 'htf_multiplier': 3,
+        'crossscore': 9.54187164700084, 'indiside': 7, 'histside': 4, 'calc': 14,
+        'ema_period': 2, 'atr_period': 3, 'atr_multiplier': 0.10022508921894348,
+        'min_trailing_stop_percent': 1.421006846803935, 'profit_target_percent': 9.527285162359538,
+        'change_threshold': 0.47744012414943654, 'stop_loss_percent': 1.9025204854865205,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    },
+    'YDEX': {
+        'figi': 'TCS00A107T19',
+        'fastLength': 1, 'slowLength': 7, 'signalLength': 7, 'htf_multiplier': 8,
+        'crossscore': 12.01137484019192, 'indiside': 5, 'histside': 6, 'calc': 2,
+        'ema_period': 2, 'atr_period': 1, 'atr_multiplier': 0.10039378727561793, 'min_trailing_stop_percent': 0.9385058520521123,
+        'profit_target_percent': 5.924038903805547, 'change_threshold': 0.9786365796775469, 'stop_loss_percent': 0.5225943139341582,
+        'initial_capital': 80000, 'commission': 0.0005, 'slippage': 0.03
+    }
+
+}
+
+# Глобальные переменные
+overall_deposit_limit = 1.0
+positions = {}
+trade_log = []
+instrument_info = {}
+moscow_tz = pytz_timezone('UTC')
+running = True
+last_entry_candle = {}
+last_candle_time = {}
+latest_candles = {ticker: None for ticker in PARAMS.keys()}
+
+
+# Глобальная переменная для основного event loop приложения
+APP_LOOP = None
+
+print("Текущая временная зона:", moscow_tz)
+
+
+DRIVE_PATH = r"G:\Мой диск\TradingBotData"
+
+# Убедимся, что папка существует
+if not os.path.exists(DRIVE_PATH):
+    os.makedirs(DRIVE_PATH)
+
+
+def load_state():
+    global positions, trade_log, last_candle_time
+    try:
+        positions_path = os.path.join(DRIVE_PATH, "positions.json")
+        if os.path.exists(positions_path):
+            with open(positions_path, "r") as f:
+                positions = json.load(f)
+            print("Состояние позиций загружено:", positions)
+        else:
+            positions = {}
+
+        trade_log_path = os.path.join(DRIVE_PATH, "trade_log.json")
+        if os.path.exists(trade_log_path):
+            with open(trade_log_path, "r") as f:
+                trade_log = json.load(f)
+            print("Лог сделок загружен:", len(trade_log), "записей")
+        else:
+            trade_log = []
+
+        candle_time_path = os.path.join(DRIVE_PATH, "last_candle_time.json")
+        if os.path.exists(candle_time_path):
+            with open(candle_time_path, "r") as f:
+                loaded_times = json.load(f)
+                for ticker, time_str in loaded_times.items():
+                    last_candle_time[ticker] = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            print("Время последних свечей загружено:", last_candle_time)
+        else:
+            last_candle_time = {}
+    except Exception as e:
+        print(f"Ошибка при загрузке состояния: {str(e)}")
+
+
+def save_state():
+    try:
+        positions_path = os.path.join(DRIVE_PATH, "positions.json")
+        with open(positions_path, "w") as f:
+            json.dump(positions, f, indent=2)
+        print("Состояние позиций сохранено:", positions)
+
+        trade_log_path = os.path.join(DRIVE_PATH, "trade_log.json")
+        with open(trade_log_path, "w") as f:
+            json.dump(trade_log, f, indent=2)
+        print("Лог сделок сохранён:", len(trade_log), "записей")
+
+        candle_time_path = os.path.join(DRIVE_PATH, "last_candle_time.json")
+        with open(candle_time_path, "w") as f:
+            serialized_times = {ticker: time.isoformat() for ticker, time in last_candle_time.items()}
+            json.dump(serialized_times, f, indent=2)
+        print("Время последних свечей сохранено:", last_candle_time)
+    except Exception as e:
+        print("Ошибка при сохранении состояния:", str(e))
+
+
+# Отправка сообщения в Telegram из синхронного кода
+def send_telegram_message(app: Application, message: str):
+    max_attempts = 10
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            if APP_LOOP is None:
+                print(f"APP_LOOP не установлен, попытка {attempt + 1}/{max_attempts}")
+                time.sleep(2)
+                attempt += 1
+                continue
+            future = asyncio.run_coroutine_threadsafe(
+                app.bot.send_message(chat_id=ALLOWED_CHAT_ID, text=message),
+                APP_LOOP
+            )
+            future.result(timeout=10)
+            print(f"Сообщение отправлено в Telegram: {message}")
+            return
+        except Exception as e:
+            print(f"Ошибка отправки сообщения в Telegram (попытка {attempt + 1}/{max_attempts}): {str(e)}")
+            attempt += 1
+            time.sleep(2)
+    print(f"Не удалось отправить сообщение после {max_attempts} попыток: {message}")
+
+
+# Получение информации об инструменте
+def get_instrument_info(figi: str):
+    with Client(SANDBOX_TOKEN) as client:
+        instrument = client.instruments.get_instrument_by(
+            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI, id=figi)
+        lot = instrument.instrument.lot
+        min_price_increment = (instrument.instrument.min_price_increment.units +
+                               instrument.instrument.min_price_increment.nano / 1e9)
+        print(f"Информация об инструменте {figi}: lot={lot}, min_price_increment={min_price_increment}")
+        return lot, min_price_increment
+
+
+def fetch_latest_candles(figi):
+    try:
+        with Client(SANDBOX_TOKEN, target="invest-public-api.tinkoff.ru:443") as client:
+            now = datetime.now(timezone.utc)
+            r = client.market_data.get_candles(
+                figi=figi,
+                from_=now - timedelta(days=50),
+                to=now,
+                interval=CandleInterval.CANDLE_INTERVAL_HOUR
+            )
+        candles = []
+        for c in r.candles:
+            time = c.time
+            candles.append({
+                'time': time,
+                'open': c.open.units + c.open.nano / 1e9,
+                'high': c.high.units + c.high.nano / 1e9,
+                'low': c.low.units + c.low.nano / 1e9,
+                'close': c.close.units + c.close.nano / 1e9,
+                'volume': c.volume
+            })
+        df = pd.DataFrame(candles)
+        if len(df) < 2:
+            print(f"Недостаточно данных свечей для {figi}: {len(df)} свечей")
+            return None
+        # Логирование данных свечей
+        print(f"{figi}: Получено {len(df)} свечей, последняя свеча: {df['time'].iloc[-1]}, Open={df['open'].iloc[-1]:.2f}, High={df['high'].iloc[-1]:.2f}, Low={df['low'].iloc[-1]:.2f}, Close={df['close'].iloc[-1]:.2f}")
+        return df
+    except Exception as e:
+        print(f"Ошибка получения свечей для {figi}: {str(e)}")
+        return None
+
+
+def calculate_indicators(df, params):
+    if len(df) < max(params['slowLength'] * params['htf_multiplier'], params['atr_period']):
+        return None
+
+    df_closed = df.iloc[:-1].copy()
+    ticker = [key for key, value in PARAMS.items() if value['figi'] == df['figi'].iloc[0]][0] if 'figi' in df.columns else "Unknown"
+
+    anlys = calculate_anlyse(df_closed['close'], params['fastLength'], params['slowLength'],
+                             params['signalLength'], params['crossscore'], params['indiside'], params['histside'])
+    anlysHfrm = calculate_anlyse(df_closed['close'], params['fastLength'] * params['htf_multiplier'],
+                                 params['slowLength'] * params['htf_multiplier'],
+                                 params['signalLength'] * params['htf_multiplier'],
+                                 params['crossscore'], params['indiside'], params['histside'])
+    result = (anlysHfrm * params['calc'] + anlys) / (params['calc'] + 1)
+    ema_50 = df_closed['close'].ewm(span=params['ema_period'], adjust=False).mean()
+    trend_filter = df_closed['close'] > ema_50
+    result_change = result.diff()
+    long_condition = (result_change.abs() > params['change_threshold']) & (result > 0) & trend_filter
+    df_closed['atr'] = ta.ATR(df_closed['high'], df_closed['low'], df_closed['close'], timeperiod=params['atr_period'])
+
+    # Логирование индикаторов для последней закрытой свечи
+    print(f"{ticker}: Индикаторы для последней закрытой свечи ({df_closed['time'].iloc[-1]}): "
+          f"anlys={anlys.iloc[-1]:.4f}, anlysHfrm={anlysHfrm.iloc[-1]:.4f}, result={result.iloc[-1]:.4f}, "
+          f"ema_50={ema_50.iloc[-1]:.2f}, trend_filter={trend_filter.iloc[-1]}, result_change={result_change.iloc[-1]:.4f}, "
+          f"long_condition={long_condition.iloc[-1]}, atr={df_closed['atr'].iloc[-1]:.4f}")
+
+    return {
+        'long_condition': long_condition.iloc[-1],
+        'atr': df_closed['atr'].iloc[-1]
+    }
+
+
+def calculate_anlyse(close, length1, length2, length3, crossscore, indiside, histside):
+    alpha1 = 2 / (length1 + 1)
+    alpha2 = 2 / (length2 + 1)
+    alpha3 = 2 / (length3 + 1)
+    ema1 = close.ewm(alpha=alpha1, adjust=False).mean()
+    ema2 = close.ewm(alpha=alpha2, adjust=False).mean()
+    indi = ema1 - ema2
+    signal = indi.ewm(alpha=alpha3, adjust=False).mean()
+    hist = indi - signal
+    anlyse = np.zeros(len(close))
+    countcross = pd.Series(np.zeros(len(close)), index=close.index)
+    indi_diff = indi.diff().fillna(0)
+    hist_diff = hist.diff().fillna(0)
+    anlyse = np.where(indi_diff > 0,
+                      np.where(hist_diff > 0, indiside + histside,
+                               np.where(hist_diff == 0, indiside, indiside - histside)),
+                      np.where(indi_diff < 0,
+                               np.where(hist_diff < 0, -(indiside + histside),
+                                        np.where(hist_diff == 0, -indiside, -(indiside - histside))),
+                               np.where(hist_diff > 0, histside,
+                                        np.where(hist_diff < 0, -histside, 0))))
+    cross_up = (indi > signal) & (indi.shift(1) <= signal.shift(1))
+    cross_down = (indi < signal) & (indi.shift(1) >= signal.shift(1))
+    countcross = np.where(cross_up, crossscore,
+                          np.where(cross_down, -crossscore,
+                                   countcross.shift(1).fillna(0) * 0.6))
+    result = pd.Series(anlyse + countcross, index=close.index)
+    return result
+
+
+def place_order(figi: str, qty: int, direction, account_id: str, app: Application, retries=3, delay=5):
+    direction_str = "BUY" if direction == OrderDirection.ORDER_DIRECTION_BUY else "SELL"
+    ticker = [key for key, value in PARAMS.items() if value['figi'] == figi][0]
+    for attempt in range(retries):
+        try:
+            with Client(SANDBOX_TOKEN, target="invest-public-api.tinkoff.ru:443") as client:
+                response = client.orders.post_order(
+                    figi=figi,
+                    quantity=int(qty),
+                    direction=direction,
+                    account_id=account_id,
+                    order_type=OrderType.ORDER_TYPE_MARKET
+                )
+                executed_price = response.executed_order_price.units + response.executed_order_price.nano / 1e9
+                return response, executed_price
+        except Exception as e:
+            print(f"Ошибка размещения ордера для {ticker}, попытка {attempt + 1}/{retries}: {str(e)}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    return None, None
+
+
+def sync_positions(client, account_id: str, app: Application):
+    print("Синхронизация позиций с брокером")
+    portfolio = client.operations.get_portfolio(account_id=account_id)
+    actual_positions = {pos.figi: pos.quantity.units for pos in portfolio.positions if pos.instrument_type != 'currency'}
+    for ticker in list(positions.keys()):
+        figi = PARAMS[ticker]['figi']
+        if figi not in actual_positions or actual_positions[figi] == 0:
+            del positions[ticker]
+            send_telegram_message(app, f"Позиция {ticker} закрыта вручную")
+
+
+def get_current_price(figi: str, retries=5, delay=10):
+    for attempt in range(retries):
+        try:
+            with Client(SANDBOX_TOKEN) as client:
+                last_price = client.market_data.get_last_prices(figi=[figi]).last_prices[0].price
+                return last_price.units + last_price.nano / 1e9
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                raise e
+
+
+# Обработка команд Telegram (асинхронные обработчики)
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global running
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        await update.message.reply_text("Доступ запрещён")
+        return
+    running = True
+    print("Команда /start: стратегия запущена")
+    await update.message.reply_text("Стратегия запущена")
+
+
+async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global running
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        await update.message.reply_text("Доступ запрещён")
+        return
+    running = False
+    print("Команда /stop: стратегия остановлена")
+    await update.message.reply_text("Стратегия остановлена")
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        await update.message.reply_text("Доступ запрещён")
+        return
+    try:
+        with Client(SANDBOX_TOKEN, target="invest-public-api.tinkoff.ru:443") as client:
+            # Получаем аккаунт и портфель
+            accounts = client.users.get_accounts()
+            if not accounts.accounts:
+                await update.message.reply_text("Нет доступных аккаунтов")
+                return
+            account_id = accounts.accounts[1].id
+            portfolio = client.operations.get_portfolio(account_id=account_id)
+            free_cash = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
+            shares_value = portfolio.total_amount_shares.units + portfolio.total_amount_shares.nano / 1e9
+            balance = free_cash + shares_value
+
+
+
+
+            # Получаем текущие цены для всех открытых позиций
+            figis = [PARAMS[ticker]['figi'] for ticker in positions.keys()]
+            current_prices = {}
+            if figis:
+                last_prices = client.market_data.get_last_prices(figi=figis).last_prices
+                current_prices = {lp.figi: lp.price.units + lp.price.nano / 1e9 for lp in last_prices}
+
+
+            # Создаём копию позиций для пересчёта параметров
+            updated_positions = positions.copy()
+            position_details = []
+            total_unrealized_profit = 0.0
+
+
+            for ticker, pos in updated_positions.items():
+                figi = PARAMS[ticker]['figi']
+                params = PARAMS[ticker]
+                current_price = current_prices.get(figi, pos['entry_price'])  # Используем entry_price, если цена недоступна
+
+
+                # Рассчитываем нереализованную прибыль/убыток
+                unrealized_profit = (current_price - pos['entry_price']) * pos['qty']
+                total_unrealized_profit += unrealized_profit
+
+
+                # Обновляем highest_price
+                if current_price > pos['highest_price']:
+                    pos['highest_price'] = current_price
+
+
+                # Пересчитываем trailing_stop
+                df = fetch_latest_candles(figi)  # Запрашиваем свечи для расчёта ATR
+                if df is not None and len(df) > 1:
+                    atr_value = ta.ATR(df['high'].iloc[:-1], df['low'].iloc[:-1], df['close'].iloc[:-1],
+                                      timeperiod=params['atr_period']).iloc[-1]
+                    new_trailing_stop = max(
+                        pos['highest_price'] - atr_value * params['atr_multiplier'],
+                        pos['entry_price'] * (1 - params['min_trailing_stop_percent'] / 100)
+                    )
+                    pos['trailing_stop'] = max(pos['trailing_stop'], new_trailing_stop)
+                else:
+                    # Если свечи недоступны, оставляем текущий trailing_stop
+                    print(f"Не удалось пересчитать ATR для {ticker}, используется старый trailing_stop")
+
+
+                # Формируем информацию о позиции
+                position_details.append(
+                    f"{ticker}: "
+                    f"Количество: {pos['qty']}, "
+                    f"Цена входа: {pos['entry_price']:.2f}, "
+                    f"Текущая цена: {current_price:.2f}, "
+                    f"Трейлинг-стоп: {pos['trailing_stop']:.2f}, "
+                    f"Тейк-профит: {pos['take_profit']:.2f}, "
+                    f"Стоп-лосс: {pos['stop_loss']:.2f}, "
+                    f"Нереализованная прибыль/убыток: {unrealized_profit:.2f} RUB"
+                )
+
+
+        # Формируем сообщение
+        msg = (
+            f"Баланс песочницы: {balance:.2f} RUB\n"
+            f"Свободные средства: {free_cash:.2f} RUB\n"
+            f"Стоимость акций: {shares_value:.2f} RUB\n"
+            f"Общая нереализованная прибыль/убыток: {total_unrealized_profit:.2f} RUB\n"
+            f"Позиции:\n" + "\n".join(position_details) + "\n"
+            f"Общая доля депозита: {overall_deposit_limit:.2f}"
+        )
+        print("Команда /status:", msg)
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка получения статуса: {str(e)}")
+
+
+async def close_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        await update.message.reply_text("Доступ запрещён")
+        return
+
+
+    try:
+        # 1) Получаем все sandbox-аккаунты и портфель из API
+        with Client(SANDBOX_TOKEN, target="invest-public-api.tinkoff.ru:443") as client:
+            accounts = client.users.get_accounts().accounts
+            if len(accounts) < 2:
+                await update.message.reply_text("Нет доступных аккаунтов")
+                return
+            account_id = accounts[1].id
+            portfolio = client.operations.get_portfolio(account_id=account_id)
+
+
+            # Отладочный вывод: смотрим содержимое instrument_info
+            print(f"В close_all_cmd instrument_info: {instrument_info}")
+
+
+            # 2) Проходим по реальным позициям из API и закрываем каждую
+            for pos in portfolio.positions:
+                figi = pos.figi
+                qty = pos.quantity.units  # Количество акций
+                # Пропускаем нулевые позиции и валюту
+                if qty == 0 or pos.instrument_type == 'currency':
+                    continue
+
+
+                # Находим тикер по FIGI в instrument_info
+                ticker = None
+                for t, info in instrument_info.items():
+                    if info[2] == figi:  # info[2] — это FIGI
+                        ticker = t
+                        break
+
+
+                if ticker is None:
+                    await update.message.reply_text(f"Не удалось найти тикер для FIGI {figi}")
+                    continue
+
+
+                # Получаем размер лота из instrument_info
+                lot_size = instrument_info[ticker][0]  # Размер лота (например, 10 для SBER)
+
+
+                # Пересчитываем акции в лоты
+                qty_lots = abs(qty) // lot_size  # Целочисленное деление для получения лотов
+                abs_qty = abs(qty)  # Для логов оставляем количество акций
+
+
+                # Для длинных (>0) — SELL, для коротких (<0) — BUY
+                direction = OrderDirection.ORDER_DIRECTION_SELL if qty > 0 else OrderDirection.ORDER_DIRECTION_BUY
+
+
+                if qty_lots > 0:
+                    print(f"Emergency close_all: {figi} qty={qty} -> closing {abs_qty} акций ({qty_lots} лотов)")
+                    order_response = place_order(figi, qty_lots, direction, account_id, context.application)
+                    if order_response:  # Проверяем, успешно ли размещён ордер
+                        if ticker in positions:
+                            del positions[ticker]
+                            success_msg = f"[{datetime.now().isoformat()}] Закрыта позиция {ticker} (FIGI: {figi})"
+                            await update.message.reply_text(success_msg)  # Используем await вместо send_telegram_message
+                    else:
+                        await update.message.reply_text(f"Не удалось закрыть позицию {ticker} (FIGI: {figi})")
+                else:
+                    print(f"Недостаточно акций для закрытия позиции {figi}")
+
+
+            # 3) Синхронизируем позиции с брокером
+            sync_positions(client, account_id, context.application)
+
+
+        await update.message.reply_text("Экстренно закрыты все позиции из API брокера")
+
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка закрытия позиций: {str(e)}")
+
+
+async def set_deposit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global overall_deposit_limit
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        await update.message.reply_text("Доступ запрещён")
+        return
+    try:
+        new_limit = float(context.args[0])
+        if 0 <= new_limit <= 1:
+            overall_deposit_limit = new_limit
+            print(f"Новая доля депозита: {overall_deposit_limit}")
+            await update.message.reply_text(f"Общая доля депозита установлена: {overall_deposit_limit}")
+        else:
+            await update.message.reply_text("Укажите значение от 0 до 1")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Использование: /set_deposit <значение от 0 до 1>")
+
+
+def run_strategy(app: Application):
+    global last_entry_candle, last_candle_time, instrument_info, running
+    time.sleep(5)
+    for ticker, params in PARAMS.items():
+        figi = params['figi']
+        try:
+            lot, min_price_increment = get_instrument_info(figi)
+            instrument_info[ticker] = [lot, min_price_increment, figi]
+        except Exception as e:
+            print(f"Ошибка получения информации об инструменте {ticker}: {str(e)}")
+            continue
+
+    with Client(SANDBOX_TOKEN, target="invest-public-api.tinkoff.ru:443") as client:
+        accounts = client.users.get_accounts().accounts
+        account_id = accounts[1].id
+
+    for ticker in PARAMS.keys():
+        if ticker not in last_candle_time:
+            last_candle_time[ticker] = None
+
+    send_telegram_message(app, "Стратегия запущена (синхронный режим с реальной проверкой)")
+    while running:
+        with Client(SANDBOX_TOKEN, target="invest-public-api.tinkoff.ru:443") as client:
+            sync_positions(client, account_id, app)
+            portfolio = client.operations.get_portfolio(account_id=account_id)
+            free_cash = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
+            shares_value = portfolio.total_amount_shares.units + portfolio.total_amount_shares.nano / 1e9
+            balance = free_cash + shares_value
+
+        # Обновление trailing stop и проверка условий выхода в реальном времени
+        for ticker in list(positions.keys()):
+            try:
+                figi = PARAMS[ticker]['figi']
+                current_price = get_current_price(figi)
+                pos = positions[ticker]
+
+                # Обновляем highest_price
+                if current_price > pos['highest_price']:
+                    pos['highest_price'] = current_price
+                    print(f"{ticker}: Новый максимум цены: {current_price:.2f}")
+
+                # Пересчитываем trailing stop с использованием сохранённого atr_value
+                atr_value = pos.get('atr_value', 0)  # Используем сохранённый ATR
+                new_trailing_stop = max(
+                    pos['highest_price'] - atr_value * params['atr_multiplier'],
+                    pos['entry_price'] * (1 - params['min_trailing_stop_percent'] / 100)
+                )
+                pos['trailing_stop'] = max(pos['trailing_stop'], new_trailing_stop)
+                print(f"{ticker}: Trailing Stop обновлён: {pos['trailing_stop']:.2f}, Current Price={current_price:.2f}")
+
+                # Проверка условий выхода
+                if (current_price >= pos['take_profit'] or
+                        current_price <= pos['trailing_stop'] or
+                        current_price <= pos['stop_loss']):
+                    exit_price = round(current_price, 2)
+                    qty_lots = pos['qty'] // instrument_info[ticker][0]
+                    if qty_lots > 0:
+                        order_response, executed_price = place_order(figi, qty_lots,
+                                                                     OrderDirection.ORDER_DIRECTION_SELL,
+                                                                     account_id, app)
+                        if order_response and executed_price:
+                            profit = (executed_price - pos['entry_price']) * pos['qty']
+                            reason = (
+                                "Trailing Stop" if current_price <= pos['trailing_stop'] else
+                                "Take Profit" if current_price >= pos['take_profit'] else
+                                "Stop Loss"
+                            )
+                            print(f"{ticker}: Выход из позиции: exit_price={executed_price:.2f}, "
+                                  f"profit={profit:.2f}, reason={reason}")
+                            send_telegram_message(app,f"Закрыта позиция {ticker}: {executed_price:.2f}, Прибыль: {profit:.2f}, Причина: {reason}")
+                            trade_log.append({
+                                "time": datetime.now().isoformat(),
+                                "ticker": ticker,
+                                "action": "sell",
+                                "price": executed_price,
+                                "profit": profit
+                            })
+                            del positions[ticker]
+                            save_state()
+            except Exception as e:
+                print(f"Ошибка обновления trailing stop для {ticker}: {str(e)}")
+
+        # Логика обработки свечей и входа в позицию
+        for ticker, params in PARAMS.items():
+            try:
+                figi = params['figi']
+                df = fetch_latest_candles(figi)
+                if df is None:
+                    continue
+
+                current_candle_time = df['time'].iloc[-1]
+                if last_candle_time[ticker] is None or current_candle_time > last_candle_time[ticker]:
+                    last_candle_time[ticker] = current_candle_time
+                    indicators = calculate_indicators(df, params)
+                    if indicators is None:
+                        continue
+
+                    long_condition = indicators['long_condition']
+                    atr_value = indicators['atr']
+                    close_price = df['close'].iloc[-1]
+                    high_price = df['high'].iloc[-1]
+                    low_price = df['low'].iloc[-1]
+
+                    current_price = get_current_price(figi)
+
+                    if ticker not in positions:
+                        print(f"{ticker}: Проверка входа ({current_candle_time}): long_condition={long_condition}, balance={balance:.2f}, free_cash={free_cash:.2f}")
+
+                    if (ticker not in positions and long_condition and free_cash > 0 and
+                            (ticker not in last_entry_candle or last_entry_candle[ticker] != current_candle_time)):
+                        entry_price = round(current_price, int(-np.log10(instrument_info[ticker][1])))
+                        lot_size = instrument_info[ticker][0]
+                        deposit_limit_per_ticker = overall_deposit_limit / len(PARAMS)
+                        allocated_money = balance * deposit_limit_per_ticker
+                        qty_lots = int(allocated_money / (entry_price * lot_size))
+
+                        if qty_lots >= 1:
+                            order_response, executed_price = place_order(figi, qty_lots, OrderDirection.ORDER_DIRECTION_BUY, account_id, app)
+                            if order_response and executed_price:
+                                qty_shares = qty_lots * lot_size
+                                positions[ticker] = {
+                                    'entry_price': executed_price,
+                                    'qty': qty_shares,
+                                    'highest_price': executed_price,
+                                    'trailing_stop': max(executed_price - atr_value * params['atr_multiplier'],
+                                                         executed_price * (1 - params['min_trailing_stop_percent'] / 100)),
+                                    'take_profit': executed_price * (1 + params['profit_target_percent'] / 100),
+                                    'stop_loss': executed_price * (1 - params['stop_loss_percent'] / 100),
+                                    'atr_value': atr_value  # Сохраняем atr_value для использования в реальном времени
+                                }
+                                print(f"{ticker}: Вход в позицию: entry_price={executed_price:.2f}, atr_value={atr_value:.4f}, "
+                                      f"trailing_stop={positions[ticker]['trailing_stop']:.2f}, take_profit={positions[ticker]['take_profit']:.2f}, "
+                                      f"stop_loss={positions[ticker]['stop_loss']:.2f}")
+                                trade_log.append({"time": datetime.now().isoformat(), "ticker": ticker, "action": "buy", "price": executed_price, "qty": qty_shares})
+                                last_entry_candle[ticker] = current_candle_time
+                                save_state()
+                                send_telegram_message(app,
+                                    f"Открыта позиция {ticker}: {qty_shares} акций по {executed_price:.2f}"
+                                )
+
+                    if ticker in positions:
+                        pos = positions[ticker]
+                        current_price = get_current_price(figi)
+
+                        # Обновляем highest_price (оставляем для свечной логики)
+                        if current_price > pos['highest_price']:
+                            pos['highest_price'] = current_price
+                            print(f"{ticker}: Новый максимум цены: {current_price:.2f}")
+
+                        # Пересчитываем ATR и Trailing Stop на основе свечей
+                        if len(df) > 1:
+                            atr_value = ta.ATR(df['high'].iloc[:-1], df['low'].iloc[:-1], df['close'].iloc[:-1],
+                                               timeperiod=params['atr_period']).iloc[-1]
+                            new_trailing_stop = max(
+                                pos['highest_price'] - atr_value * params['atr_multiplier'],
+                                pos['entry_price'] * (1 - params['min_trailing_stop_percent'] / 100)
+                            )
+                            pos['trailing_stop'] = max(pos['trailing_stop'], new_trailing_stop)
+                            print(
+                                f"{ticker}: Trailing Stop обновлён: {pos['trailing_stop']:.2f}, ATR={atr_value:.4f}, Current Price={current_price:.2f}")
+
+                        # Проверка условий выхода на основе свечей
+                        if (current_price >= pos['take_profit'] or
+                                current_price <= pos['trailing_stop'] or
+                                current_price <= pos['stop_loss']):
+                            exit_price = round(current_price, 2)
+                            qty_lots = pos['qty'] // instrument_info[ticker][0]
+                            if qty_lots > 0:
+                                order_response, executed_price = place_order(figi, qty_lots,
+                                                                             OrderDirection.ORDER_DIRECTION_SELL,
+                                                                             account_id, app)
+                                if order_response and executed_price:
+                                    profit = (executed_price - pos['entry_price']) * pos['qty']
+                                    reason = (
+                                        "Trailing Stop" if current_price <= pos['trailing_stop'] else
+                                        "Take Profit" if current_price >= pos['take_profit'] else
+                                        "Stop Loss"
+                                    )
+                                    print(f"{ticker}: Выход из позиции: exit_price={executed_price:.2f}, "
+                                          f"profit={profit:.2f}, reason={reason}")
+                                    send_telegram_message(app,
+                                                          f"Закрыта позиция {ticker}: {executed_price:.2f}, Прибыль: {profit:.2f}, Причина: {reason}"
+                                                          )
+                                    trade_log.append({
+                                        "time": datetime.now().isoformat(),
+                                        "ticker": ticker,
+                                        "action": "sell",
+                                        "price": executed_price,
+                                        "profit": profit
+                                    })
+                                    del positions[ticker]
+                                    save_state()
+
+            except Exception as e:
+                print(f"Ошибка обработки тикера {ticker}: {str(e)}")
+
+        time.sleep(10)
+
+    send_telegram_message(app, "Стратегия остановлена")
+
+def main():
+    load_state()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    async def set_global_loop(context: ContextTypes.DEFAULT_TYPE):
+        global APP_LOOP
+        APP_LOOP = asyncio.get_running_loop()
+        print("APP_LOOP установлен:", APP_LOOP)
+
+    app.job_queue.run_once(set_global_loop, when=0)
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("stop", stop_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("close_all", close_all_cmd))
+    app.add_handler(CommandHandler("set_deposit", set_deposit_cmd))
+
+
+    # Запуск стратегии
+    strategy_thread = threading.Thread(target=run_strategy, args=(app,), daemon=True)
+    strategy_thread.start()
+
+    app.run_polling()
+    save_state()
+
+if __name__ == "__main__":
+    main()
