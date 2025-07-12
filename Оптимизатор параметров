@@ -1,466 +1,239 @@
+# ==============================================================================
+#           АВТОМАТИЗИРОВАННЫЙ ОПТИМИЗАТОР ТОРГОВОЙ СТРАТЕГИИ
+# ==============================================================================
 import pandas as pd
 import numpy as np
-import talib as ta
+import vectorbt as vbt
+import pandas_ta as ta
 import optuna
 import logging
-from datetime import datetime, timedelta, time
+import sys
+from datetime import datetime
+from dataclasses import dataclass
+from typing import Dict, Any
+from numba import njit  # Убедись, что этот импорт есть
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-# Параметры стратегии
-PARAMS = {
-    'SBER': {
-        'figi': 'BBG004730N88',
-        'initial_capital': 20000,
-        'commission': 0.0005,
-        'slippage_percent': 0.0005,
-        'lot_size': 10,
-        'min_price_increment': 0.01,
-        'adx_threshold': 20  # Фиксированный порог ADX
-    }
-}
-
-
-# Функция округления цены
-def round_to_increment(price, increment):
-    return np.round(price / increment) * increment
+# --- КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ---
+log_filename = f'wfa_supertrend_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-# Расчет VWAP для 4H баров без look-ahead (ИСПРАВЛЕНО)
-def calculate_4h_vwap(df_4h, df_1m):
-    df_4h = df_4h.copy()
-    df_4h['vwap'] = np.nan
+# --- ЛОГИКА ВЫХОДА ---
+@njit
+def generate_stop_exits_nb(close: np.ndarray, entries: np.ndarray, short_entries: np.ndarray, sl_stop: float,
+                           tsl_stop: float):
+    exits = np.full_like(entries, False)
+    short_exits = np.full_like(short_entries, False)
 
-    for i in range(len(df_4h)):
-        bar_start = df_4h.index[i]
-        bar_end = bar_start + pd.Timedelta(hours=4)
+    # Для лонг-позиций
+    in_long_position = False
+    long_entry_price = 0.0
+    trailing_high = 0.0
+    for i in range(len(close)):
+        if short_entries[i] and in_long_position:
+            exits[i] = True
+            in_long_position = False
+        if in_long_position:
+            if close[i] > trailing_high:
+                trailing_high = close[i]
+            if close[i] < long_entry_price * (1 - sl_stop):
+                exits[i] = True
+                in_long_position = False
+            elif tsl_stop > 0 and close[i] < trailing_high * (1 - tsl_stop):
+                exits[i] = True
+                in_long_position = False
+        if entries[i] and not in_long_position:
+            in_long_position = True
+            long_entry_price = close[i]
+            trailing_high = close[i]
 
-        # Используем только данные, доступные ДО окончания текущего бара
-        minutes_data = df_1m[(df_1m.index >= bar_start) & (df_1m.index < bar_end)]
+    # Для шорт-позиций
+    in_short_position = False
+    short_entry_price = 0.0
+    trailing_low = np.inf
+    for i in range(len(close)):
+        if entries[i] and in_short_position:
+            short_exits[i] = True
+            in_short_position = False
+        if in_short_position:
+            if close[i] < trailing_low:
+                trailing_low = close[i]
+            if close[i] > short_entry_price * (1 + sl_stop):
+                short_exits[i] = True
+                in_short_position = False
+            elif tsl_stop > 0 and close[i] > trailing_low * (1 + tsl_stop):
+                short_exits[i] = True
+                in_short_position = False
+        if short_entries[i] and not in_short_position:
+            in_short_position = True
+            short_entry_price = close[i]
+            trailing_low = close[i]
 
-        if len(minutes_data) < 10:  # Минимальное количество точек для расчета
-            continue
-
-        typical_price = (minutes_data['high'] + minutes_data['low'] + minutes_data['close']) / 3
-        total_pv = (typical_price * minutes_data['volume']).sum()
-        total_vol = minutes_data['volume'].sum()
-
-        if total_vol > 0:
-            df_4h.loc[df_4h.index[i], 'vwap'] = total_pv / total_vol
-
-    return df_4h
-
-def backtest_strategy(df_1m, df_4h_historical, params, fixed_params, ticker):
-    lot_size = fixed_params['lot_size']
-    min_price_increment = fixed_params['min_price_increment']
-    commission = fixed_params['commission']
-    initial_capital = fixed_params['initial_capital']
-    slippage_percent = fixed_params['slippage_percent']
-    adx_threshold = fixed_params['adx_threshold']
-
-    # Рассчитываем VWAP без look-ahead
-    df_4h = calculate_4h_vwap(df_4h_historical, df_1m)
-
-    # Добавляем close_time для проверки завершенности баров
-    df_4h['close_time'] = df_4h.index + pd.Timedelta(hours=4)
-
-    # Рассчитываем индикаторы без look-ahead (только по завершенным данным)
-    macd_values = []
-    signal_values = []
-    adx_values = []
-
-    macd_fast = params['macd_fast']
-    macd_slow = params['macd_slow']
-    macd_signal = params['macd_signal']
-
-    for i in range(len(df_4h)):
-        # Берем только исторические данные до текущего индекса
-        subset = df_4h.iloc[:i + 1]
-
-        # Рассчитываем индикаторы только когда достаточно данных
-        if i < max(macd_slow, macd_signal, 14):
-            macd_values.append(np.nan)
-            signal_values.append(np.nan)
-            adx_values.append(np.nan)
-        else:
-            # MACD
-            macd, signal, _ = ta.MACD(
-                subset['close'],
-                fastperiod=macd_fast,
-                slowperiod=macd_slow,
-                signalperiod=macd_signal
-            )
-            macd_values.append(macd.iloc[-1])
-            signal_values.append(signal.iloc[-1])
-
-            # ADX
-            adx = ta.ADX(
-                subset['high'],
-                subset['low'],
-                subset['close'],
-                timeperiod=14
-            )
-            adx_values.append(adx.iloc[-1])
-
-    # Добавляем рассчитанные индикаторы
-    df_4h['macd'] = macd_values
-    df_4h['signal'] = signal_values
-    df_4h['adx'] = adx_values
-
-    trades = []
-    current_trade = None
-    equity = initial_capital
-    equity_curve = [equity]
-    trade_number = 0
-
-    # Переменные для хранения последнего сигнала
-    last_long_signal = False
-    last_short_signal = False
-
-    for i in range(1, len(df_1m)):
-        current_time = df_1m.index[i]
-        open_price = df_1m['open'].iloc[i]
-        high_price = df_1m['high'].iloc[i]
-        low_price = df_1m['low'].iloc[i]
-
-        # Сброс сигналов при переходе на новый день
-        if current_time.time() < time(4, 5):  # После полуночи
-            last_long_signal = False
-            last_short_signal = False
-
-        # Фильтруем завершенные 4H бары (+1 минута на "остывание")
-        completed_4h = df_4h[df_4h['close_time'] + pd.Timedelta(minutes=1) <= current_time]
-
-        if len(completed_4h) > 1:  # Нужно как минимум 2 завершенных бара
-            # Берем последний завершенный бар и предыдущий
-            last_completed_bar = completed_4h.iloc[-1]
-            prev_bar = completed_4h.iloc[-2]
-
-            # ИСПРАВЛЕНИЕ: Используем isna() вместо np.isnan()
-            if not (last_completed_bar[['vwap', 'macd', 'signal', 'adx']].isna().any() or
-                    prev_bar[['vwap', 'macd', 'signal', 'adx']].isna().any()):
-                # Условия входа с использованием только завершенных данных
-                long_condition = (prev_bar['close'] > prev_bar['vwap']) & \
-                                 (last_completed_bar['macd'] > last_completed_bar['signal']) & \
-                                 (prev_bar['macd'] <= prev_bar['signal']) & \
-                                 (prev_bar['adx'] > adx_threshold)
-
-                short_condition = (prev_bar['close'] < prev_bar['vwap']) & \
-                                  (last_completed_bar['macd'] < last_completed_bar['signal']) & \
-                                  (prev_bar['macd'] >= prev_bar['signal']) & \
-                                  (prev_bar['adx'] > adx_threshold)
-
-                # Сохраняем сигналы для использования в течение периода свечи
-                last_long_signal = long_condition
-                last_short_signal = short_condition
-
-        signal_long = last_long_signal
-        signal_short = last_short_signal
-
-        # Обновление кривой капитала
-        if current_trade:
-            if current_trade['direction'] == 'long':
-                position_value = open_price * current_trade['qty']
-                current_equity = equity + (position_value - current_trade['entry_price'] * current_trade['qty'])
-            else:
-                position_value = current_trade['entry_price'] * current_trade['qty'] - open_price * current_trade['qty']
-                current_equity = equity + position_value
-        else:
-            current_equity = equity
-        equity_curve.append(current_equity)
-
-        # Вход в длинную позицию по открытию
-        if not current_trade and signal_long:
-            entry_price = round_to_increment(open_price * (1 + slippage_percent), min_price_increment)
-            qty = int(equity / (entry_price * lot_size)) * lot_size
-            if qty < lot_size:
-                continue
-            entry_commission = entry_price * qty * commission
-            equity -= entry_commission
-            stop_loss = entry_price * (1 - params['stop_loss_percent'] / 100)
-            take_profit = entry_price * (1 + params['take_profit_percent'] / 100)
-            stop_loss = round_to_increment(stop_loss, min_price_increment)
-            take_profit = round_to_increment(take_profit, min_price_increment)
-            trade_number += 1
-            current_trade = {
-                'trade_number': trade_number,
-                'entry_time': current_time,
-                'entry_price': entry_price,
-                'qty': qty,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'entry_commission': entry_commission,
-                'direction': 'long'
-            }
-
-        # Вход в короткую позицию по открытию
-        elif not current_trade and signal_short:
-            entry_price = round_to_increment(open_price * (1 - slippage_percent), min_price_increment)
-            qty = int(equity / (entry_price * lot_size)) * lot_size
-            if qty < lot_size:
-                continue
-            entry_commission = entry_price * qty * commission
-            equity -= entry_commission
-            stop_loss = entry_price * (1 + params['stop_loss_percent'] / 100)
-            take_profit = entry_price * (1 - params['take_profit_percent'] / 100)
-            stop_loss = round_to_increment(stop_loss, min_price_increment)
-            take_profit = round_to_increment(take_profit, min_price_increment)
-            trade_number += 1
-            current_trade = {
-                'trade_number': trade_number,
-                'entry_time': current_time,
-                'entry_price': entry_price,
-                'qty': qty,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'entry_commission': entry_commission,
-                'direction': 'short'
-            }
-
-        # Выход из позиции по ценам бара
-        elif current_trade:
-            exit_price = None
-            exit_reason = None
-
-            if current_trade['direction'] == 'long':
-                if high_price >= current_trade['take_profit']:
-                    exit_price = current_trade['take_profit']
-                    exit_reason = 'Take Profit'
-                elif low_price <= current_trade['stop_loss']:
-                    exit_price = current_trade['stop_loss']
-                    exit_reason = 'Stop Loss'
-            else:
-                if low_price <= current_trade['take_profit']:
-                    exit_price = current_trade['take_profit']
-                    exit_reason = 'Take Profit'
-                elif high_price >= current_trade['stop_loss']:
-                    exit_price = current_trade['stop_loss']
-                    exit_reason = 'Stop Loss'
-
-            if exit_price:
-                exit_commission = exit_price * current_trade['qty'] * commission
-                if current_trade['direction'] == 'long':
-                    profit = (exit_price - current_trade['entry_price']) * current_trade['qty'] - \
-                             (current_trade['entry_commission'] + exit_commission)
-                else:
-                    profit = (current_trade['entry_price'] - exit_price) * current_trade['qty'] - \
-                             (current_trade['entry_commission'] + exit_commission)
-                equity += profit
-                current_trade.update({
-                    'exit_time': current_time,
-                    'exit_price': exit_price,
-                    'exit_reason': exit_reason,
-                    'profit': profit,
-                    'equity': equity,
-                    'exit_commission': exit_commission
-                })
-                trades.append(current_trade)
-                current_trade = None
-
-    # Закрытие открытой позиции по последнему доступному открытию
-    if current_trade:
-        exit_price = round_to_increment(df_1m['open'].iloc[-1], min_price_increment)
-        exit_commission = exit_price * current_trade['qty'] * commission
-        if current_trade['direction'] == 'long':
-            profit = (exit_price - current_trade['entry_price']) * current_trade['qty'] - \
-                     (current_trade['entry_commission'] + exit_commission)
-        else:
-            profit = (current_trade['entry_price'] - exit_price) * current_trade['qty'] - \
-                     (current_trade['entry_commission'] + exit_commission)
-        equity += profit
-        current_trade.update({
-            'exit_time': df_1m.index[-1],
-            'exit_price': exit_price,
-            'exit_reason': 'Конец теста',
-            'profit': profit,
-            'equity': equity,
-            'exit_commission': exit_commission
-        })
-        trades.append(current_trade)
-
-    # Расчет метрик
-    if trades:
-        total_profit = sum(trade['profit'] for trade in trades)
-        num_trades = len(trades)
-        win_trades = [t for t in trades if t['profit'] > 0]
-        win_rate = len(win_trades) / num_trades * 100 if num_trades > 0 else 0
-        gross_profit = sum(t['profit'] for t in win_trades)
-        loss_trades = [t for t in trades if t['profit'] <= 0]
-        gross_loss = abs(sum(t['profit'] for t in loss_trades)) if loss_trades else 0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-        total_commissions = sum(trade['entry_commission'] + trade['exit_commission'] for trade in trades)
-        final_equity = equity_curve[-1]
-        years = (df_1m.index[-1] - df_1m.index[0]).days / 365.25
-        cagr = ((final_equity / initial_capital) ** (1 / years) - 1) * 100 if years > 0 else 0
-        peak = initial_capital
-        max_drawdown = 0
-        for eq in equity_curve:
-            if eq > peak:
-                peak = eq
-            drawdown = (peak - eq) / peak * 100
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
-    else:
-        total_profit = 0
-        num_trades = 0
-        win_rate = 0
-        profit_factor = 0
-        total_commissions = 0
-        final_equity = initial_capital
-        cagr = 0
-        max_drawdown = 0
-
-    return {
-        'total_profit': total_profit,
-        'num_trades': num_trades,
-        'win_rate': win_rate,
-        'profit_factor': profit_factor,
-        'max_drawdown': max_drawdown,
-        'final_equity': final_equity,
-        'cagr': cagr,
-        'total_commissions': total_commissions,
-        'equity_curve': equity_curve,
-        'trades': trades
-    }
+    return exits, short_exits
 
 
-# Walk-forward оптимизация (ИСПРАВЛЕНО)
-def walk_forward_optimize(ticker, n_trials, start_date, end_date):
-    file_path = f'{ticker}_combined_2023_2025.csv'
+# --- КОНФИГУРАЦИЯ СТРАТЕГИИ И БЭКТЕСТА ---
+@dataclass(frozen=True)
+class Config:
+    TICKER: str = 'T'
+    START_DATE: str = '2020-01-10'
+    END_DATE: str = '2025-06-25'
+    TRAIN_YEARS: int = 2
+    TEST_MONTHS: int = 12
+    STEP_MONTHS: int = 12
+    N_TRIALS_PER_STEP: int = 100  
+
+    TRADE_MODE: str = 'LongAndShort'
+    INITIAL_CAPITAL: float = 20000.0
+    COMMISSION_PERCENT: float = 0.0005
+    SLIPPAGE_PERCENT: float = 0.001
+    CAPITAL_SHARE_TO_USE: float = 0.90
+    EMERGENCY_SL_PERCENT: float = 10.0
+
+
+# --- ЗАГРУЗКА ДАННЫХ ---
+def load_and_prepare_data(ticker: str):
+    file_path = f'{ticker}_data.csv'
     try:
-        df = pd.read_csv(file_path, parse_dates=['time'], index_col='time')
-        required_columns = ['open', 'high', 'low', 'close', 'volume', 'timeframe']
-        if not all(col in df.columns for col in required_columns):
-            logging.error(f"Отсутствуют столбцы в данных: {[col for col in required_columns if col not in df.columns]}")
-            return [], []
+        df_full = pd.read_csv(file_path, parse_dates=['time'], index_col='time')
+        if df_full.index.tz is None: df_full = df_full.tz_localize('UTC')
+        df_1m = df_full[df_full['timeframe'] == '1m'].drop(columns=['timeframe'])
+        df_5m = df_full[df_full['timeframe'] == '5m'].drop(columns=['timeframe'])
+        rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        df_1m, df_5m = df_1m.rename(columns=rename_map), df_5m.rename(columns=rename_map)
+        logging.info(f"Данные для {ticker} успешно загружены: {len(df_1m)} 1m баров, {len(df_5m)} 5m баров.")
+        return df_1m, df_5m
     except FileNotFoundError:
-        logging.error(f"Файл данных для {ticker} не найден")
-        return [], []
+        logging.error(f"Файл с данными '{file_path}' не найден. Работа прервана.")
+        return pd.DataFrame(), pd.DataFrame()
 
-    df = df.sort_index()
-    # Фильтрация по времени торгов
-    df_1m = df[df['timeframe'] == '1m'].between_time('04:00', '20:50')
-    df_4h = df[df['timeframe'] == '4H'].between_time('04:00', '20:00')
 
-    if df_1m.empty or df_4h.empty:
-        logging.error("Нет данных для минутного или 4-часового таймфрейма")
-        return [], []
+# --- ДВИЖОК БЭКТЕСТА ---
+def run_backtest(df_1m: pd.DataFrame, df_5m: pd.DataFrame, params: Dict[str, Any], config: Config) -> Dict[str, Any]:
+    if df_1m.empty or df_5m.empty:
+        return {'num_trades': 0, 'stats': pd.Series(dtype=float)}
 
-    fixed_params = PARAMS[ticker].copy()
-    fixed_params['adx_threshold'] = 20
+   """ Основная логика находится тут (вырезана)"""
 
-    train_years = 2
-    test_months = 12
-    step_months = 12
-    current_date = pd.to_datetime(start_date, utc=True)
-    end_date = pd.to_datetime(end_date, utc=True)
-    train_period = pd.DateOffset(years=train_years)
-    test_period = pd.DateOffset(months=test_months)
-    step_period = pd.DateOffset(months=step_months)
+    try:
+        portfolio = vbt.Portfolio.from_signals(
+            close=df_1m['Close'],
+            entries=entries,
+            short_entries=short_entries,
+            exits=exits,
+            short_exits=short_exits,
+            size=config.CAPITAL_SHARE_TO_USE,
+            size_type='Percent',
+            upon_opposite_entry='Close',
+            init_cash=config.INITIAL_CAPITAL,
+            fees=config.COMMISSION_PERCENT,
+            slippage=config.SLIPPAGE_PERCENT,
+            freq='min'
+        )
 
-    all_equity_curves = []
-    best_params_list = []
-    all_trades = []
-    step_num = 1
+        if portfolio.trades.records.size == 0: return {'num_trades': 0, 'stats': pd.Series(dtype=float)}
+        stats = portfolio.stats()
+        return {'stats': stats, 'num_trades': stats.get('Total Trades', 0), 'trades': portfolio.trades.records_readable,
+                'raw_trades': portfolio.trades.records}
+    except Exception as e:
+        import traceback
+        logging.error(f"Ошибка при расчете портфеля: {e}\n{traceback.format_exc()}")
+        return {'num_trades': 0, 'stats': pd.Series(dtype=float)}
 
+
+# --- ОРКЕСТРАТОР WFA и ИТОГОВАЯ СТАТИСТИКА ---
+def run_walk_forward_optimization(config: Config):
+    logging.info(f"Логи этого запуска будут сохранены в файл: {log_filename}")
+    df_1m, df_5m = load_and_prepare_data(config.TICKER)
+    if df_1m.empty: return
+    current_date = pd.to_datetime(config.START_DATE, utc=True)
+    end_date = pd.to_datetime(config.END_DATE, utc=True)
+    train_period = pd.DateOffset(years=config.TRAIN_YEARS)
+    test_period = pd.DateOffset(months=config.TEST_MONTHS)
+    step_period = pd.DateOffset(months=config.STEP_MONTHS)
+    out_of_sample_stats, out_of_sample_trades_dfs, step_num = [], [], 1
     while current_date + train_period + test_period <= end_date:
-        train_start = current_date
-        train_end = current_date + train_period - timedelta(seconds=1)
-        test_start = train_end + timedelta(seconds=1)
-        test_end = test_start + test_period - timedelta(seconds=1)
+        train_start, train_end = current_date, current_date + train_period
+        test_start, test_end = train_end, train_end + test_period
+        df_1m_train, df_5m_train = df_1m.loc[train_start:train_end].copy(), df_5m.loc[train_start:train_end].copy()
+        df_1m_test, df_5m_test = df_1m.loc[test_start:test_end].copy(), df_5m.loc[test_start:test_end].copy()
+        logging.info(f"\n{'=' * 80}\n--- Шаг {step_num}: Обучение на {train_start.date()} - {train_end.date()} ---")
 
-        # Подготовка данных без look-ahead
-        # Для тренировки используем только данные до конца тренировочного периода
-        df_4h_train = df_4h.loc[train_start:train_end].copy()
-        df_train_1m = df_1m.loc[train_start:train_end].copy()
-
-        # Для теста берем данные с запасом для инициализации индикаторов
-        history_start = train_start - pd.DateOffset(months=6)  # Добавляем 6 месяцев истории
-        df_4h_test = df_4h.loc[history_start:test_end].copy()
-        df_test_1m = df_1m.loc[history_start:test_end].copy()
-
-        if len(df_train_1m) < 500 or len(df_test_1m) == 0 or len(df_4h_train) < 50:
-            logging.warning(f"Пропуск шага {step_num}: недостаточно данных")
-            current_date += step_period
-            step_num += 1
-            continue
-
-        def objective(trial):
+        def objective(trial: optuna.Trial) -> float:
             params = {
-                'macd_fast': trial.suggest_int('macd_fast', 5, 20),
-                'macd_slow': trial.suggest_int('macd_slow', 10, 30),
-                'macd_signal': trial.suggest_int('macd_signal', 5, 20),
-                'stop_loss_percent': trial.suggest_float('stop_loss_percent', 0.5, 3.0),
-                'take_profit_percent': trial.suggest_float('take_profit_percent', 1.0, 6.0)
+                'donchian_period': trial.suggest_int('donchian_period', 12, 48),
+                'sl_percent': trial.suggest_float('sl_percent', 0.5, 5.0, step=0.25),
+                'tsl_percent': trial.suggest_float('tsl_percent', 1.0, 10.0, step=0.25),
+                # <<< НОВЫЙ ПАРАМЕТР ДЛЯ ОПТИМИЗАЦИИ ФИЛЬТРА >>>
+                'ema_period': trial.suggest_int('ema_period', 100, 300)
             }
-            metrics = backtest_strategy(df_train_1m, df_4h_train, params, fixed_params, ticker)
+            metrics = run_backtest(df_1m_train, df_5m_train.copy(), params, config)
+            if metrics.get('num_trades', 0) < 20: return -1.0
+            stats = metrics.get('stats')
+            calmar = -1.0
+            if stats is not None and not stats.empty: calmar = stats.get('Calmar Ratio', -1.0)
+            return calmar if np.isfinite(calmar) else -1.0
 
-            reject_reason = ""
-            if metrics['num_trades'] < 10:
-                reject_reason = "Слишком мало сделок (<10)"
-            elif metrics['win_rate'] < 25:
-                reject_reason = "Низкий процент выигрышей (<25%)"
-            elif metrics['profit_factor'] < 1.0:
-                reject_reason = f"Фактор прибыли <1 ({metrics['profit_factor']:.2f})"
-            elif metrics['max_drawdown'] > 30:
-                reject_reason = f"Слишком большая просадка ({metrics['max_drawdown']:.2f}%)"
-
-            if reject_reason:
-                trial.set_user_attr("reject_reason", reject_reason)
-                return -float('inf')
-
-            trade_count_penalty = max(0, 20 - metrics['num_trades']) * 100
-            stability_bonus = metrics['win_rate'] * 10 if metrics['win_rate'] > 50 else 0
-            score = metrics['total_profit'] - trade_count_penalty + stability_bonus
-
-            logging.info(
-                f"Trial {trial.number}: Прибыль={metrics['total_profit']:.2f} RUB, "
-                f"Сделки={metrics['num_trades']}, Win%={metrics['win_rate']:.1f}, "
-                f"PF={metrics['profit_factor']:.2f}, MDD={metrics['max_drawdown']:.1f}%"
-            )
-            return score
-
-        study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=n_trials)
-
-        best_params = study.best_params
-        metrics_test = backtest_strategy(df_test_1m, df_4h_test, best_params, fixed_params, ticker)
-
-        logging.info(f"\n=== Шаг {step_num}: Тестовый период {test_start} - {test_end} ===")
-        logging.info(f"Лучшие параметры: {best_params}")
-        logging.info(f"Общая прибыль: {metrics_test['total_profit']:.2f} RUB")
-        logging.info(f"Количество сделок: {metrics_test['num_trades']}")
-        logging.info(f"Процент выигрышей: {metrics_test['win_rate']:.2f}%")
-        logging.info(f"Фактор прибыли: {metrics_test['profit_factor']:.4f}")
-        logging.info(f"Максимальная просадка: {metrics_test['max_drawdown']:.2f}%")
-        logging.info(f"Конечный капитал: {metrics_test['final_equity']:.2f} RUB")
-        logging.info(f"CAGR: {metrics_test['cagr']:.2f}%")
-        logging.info(f"Комиссии: {metrics_test['total_commissions']:.2f} RUB")
-
-        if metrics_test['trades']:
-            trades_df = pd.DataFrame(metrics_test['trades'])
-            trades_df.to_csv(f'{ticker}_test_trades_step_{step_num}.csv', index=False)
-
-        all_equity_curves.append(metrics_test['equity_curve'])
-        best_params_list.append(best_params)
-        all_trades.extend(metrics_test['trades'])
-        step_num += 1
+        study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=42))
+        study.optimize(objective, n_trials=config.N_TRIALS_PER_STEP, n_jobs=-1, show_progress_bar=True)
+        best_params, best_value = study.best_params, study.best_value
+        logging.info("Обучение завершено.")
+        logging.info(f"Лучшие параметры найдены (Целевая метрика Calmar Ratio: {best_value:.2f}):")
+        for k, v in best_params.items(): logging.info(f"    {k}: {v}")
+        logging.info(
+            f"\n--- Результаты на тестовом периоде (Шаг {step_num}: {test_start.date()} - {test_end.date()}) ---")
+        metrics_test = run_backtest(df_1m_test, df_5m_test.copy(), best_params, config)
+        stats_test = metrics_test.get('stats')
+        if stats_test is not None and not stats_test.empty:
+            logging.info("Детальная статистика:\n" + str(stats_test))
+            if metrics_test.get('num_trades', 0) > 0:
+                out_of_sample_stats.append(stats_test)
+                trades_df = metrics_test['trades']
+                trades_df['step'] = step_num
+                out_of_sample_trades_dfs.append(trades_df)
+        else:
+            logging.warning("    На тестовом периоде сделок не было.")
         current_date += step_period
+        step_num += 1
+    if out_of_sample_stats:
+        summarize_final_results(out_of_sample_stats, out_of_sample_trades_dfs, config)
+    else:
+        logging.warning("\nЗа весь период walk-forward анализа не было совершено ни одной сделки.")
 
-    if all_trades:
-        pd.DataFrame(all_trades).to_csv(f'{ticker}_all_trades.csv', index=False)
 
-    return all_equity_curves, best_params_list
+def summarize_final_results(stats_list: list, trades_df_list: list, config: Config):
+    logging.info(f"\n{'=' * 80}\n--- СВОДНАЯ СТАТИСТИКА ПО ТЕСТОВЫМ ПЕРИОДАМ ({config.TICKER}) ---")
+    if not stats_list:
+        logging.warning("Итоговая статистика не может быть рассчитана, так как не было ни одной сделки.")
+        return
+    summary_df = pd.concat(stats_list, axis=1)
+    summary_df.columns = [f'Шаг {i + 1}' for i in range(len(stats_list))]
+    numeric_summary = summary_df.select_dtypes(include=np.number)
+    summary_df['Среднее'], summary_df['Ст. отклонение'] = numeric_summary.mean(axis=1), numeric_summary.std(axis=1)
+    key_metrics = ['Total Return [%]', 'Max Drawdown [%]', 'Win Rate [%]', 'Profit Factor', 'Calmar Ratio',
+                   'Sharpe Ratio', 'Sortino Ratio', 'Total Trades']
+    display_summary = summary_df.reindex(key_metrics)
+    logging.info("Сравнение ключевых метрик по out-of-sample периодам:")
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 120):
+        logging.info("\n" + str(display_summary.round(2)))
+    if trades_df_list:
+        all_trades_df = pd.concat(trades_df_list, ignore_index=True)
+        trades_filename = f'wfa_all_trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        all_trades_df.to_csv(trades_filename)
+        logging.info(f"\nПолный список всех сделок сохранен в файл: {trades_filename}")
 
 
 if __name__ == "__main__":
-    tickers = ['SBER']
-    n_trials = 300
-    start_date = '2020-01-01'
-    end_date = '2025-05-30'
-
-    for ticker in tickers:
-        logging.info(f"Оптимизация для {ticker}")
-        equity_curves, best_params = walk_forward_optimize(ticker, n_trials, start_date, end_date)
-        logging.info(f"Оптимизация завершена для {ticker}")
+    script_config = Config()
+    logging.info(f"Запуск WFA для гипотезы SuperTrend на тикере: {script_config.TICKER}...")
+    run_walk_forward_optimization(script_config)
+    logging.info(f"\n--- Процесс для {script_config.TICKER} завершен. ---")
